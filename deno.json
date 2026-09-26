@@ -1,0 +1,7 @@
+{
+  "tasks": {
+    "check": "deno check scripts/*.ts",
+    "test:frontend": "deno run --allow-run=npm scripts/ci.ts",
+    "lock:nix": "deno run --allow-run=prefetch-npm-deps --allow-write=nix/generated-npm-hash.json scripts/update-npm-hash.ts"
+  }
+}

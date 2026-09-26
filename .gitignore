@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+frontend/node_modules/
+src/qcl_negf_api/static/
+.env
+*.token
+result

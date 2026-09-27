@@ -6,6 +6,6 @@ Changes to a public API require an accompanying API test and a coordinated chang
 
 The browser bundle is generated during the build. Commit source files and `frontend/package-lock.json`, not generated assets or dependency directories. The root integration repository records component Git submodules and a generated Python workspace lock. Update dependency versions in package metadata and regenerate that central lock together; do not duplicate component revision pins or Python lockfiles here.
 
-Open issues and pull requests at https://github.com/AfonenkoA/qcl-negf-portal. Include a minimal reproducible case with synthetic or publicly shareable input data. Remove credentials, usernames, infrastructure addresses and unpublished scientific data from logs before sharing them.
+Open issues and pull requests at https://github.com/Afonenko-QCL-NEGF/qcl-negf-portal. Include a minimal reproducible case with synthetic or publicly shareable input data. Remove credentials, usernames, infrastructure addresses and unpublished scientific data from logs before sharing them.
 
-Integration CI is defined in the [qcl-negf superproject](https://github.com/AfonenkoA/qcl-negf) and uses its local runner. Update the component gitlink there to check a change with the complete selected source graph.
+Integration CI is defined in the [qcl-negf superproject](https://github.com/Afonenko-QCL-NEGF/qcl-negf) and uses its local runner. Update the component gitlink there to check a change with the complete selected source graph.

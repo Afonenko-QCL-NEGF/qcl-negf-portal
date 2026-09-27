@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/AfonenkoA/qcl-negf-portal"
+Repository = "https://github.com/Afonenko-QCL-NEGF/qcl-negf-portal"
 
 [project.scripts]
 qcl-negf-api = "qcl_negf_api.main:main"

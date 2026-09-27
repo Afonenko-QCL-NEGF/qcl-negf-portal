@@ -22,7 +22,7 @@ pkgs.buildNpmPackage {
   '';
   meta = {
     description = "Static browser application for QCL-NEGF scientific workflows";
-    homepage = "https://github.com/AfonenkoA/qcl-negf-portal";
+    homepage = "https://github.com/Afonenko-QCL-NEGF/qcl-negf-portal";
     license = pkgs.lib.licenses.mit;
   };
 }

@@ -22,7 +22,7 @@ uv venv --python 3.14
 uv pip install --python .venv/bin/python --find-links /path/to/release/wheels qcl-negf-api==0.2.0
 ```
 
-The portal wheel must contain the compiled browser assets. The build instructions below generate them. Package source metadata has no dependency on a sibling checkout. For NixOS deployment, use [qcl-negf-platform](https://github.com/AfonenkoA/qcl-negf-platform), which provides the service identity, runtime credential configuration and AiiDA profile setup. Configure a TLS reverse proxy or an SSH tunnel for access to the loopback listener.
+The portal wheel must contain the compiled browser assets. The build instructions below generate them. Package source metadata has no dependency on a sibling checkout. For NixOS deployment, use [qcl-negf-platform](https://github.com/Afonenko-QCL-NEGF/qcl-negf-platform), which provides the service identity, runtime credential configuration and AiiDA profile setup. Configure a TLS reverse proxy or an SSH tunnel for access to the loopback listener.
 
 Create a token file readable only by the service account. Supply its path as `QCL_NEGF_API_TOKEN_FILE`; the token must contain at least 32 ASCII characters and should be generated randomly. Register the solver Code using the AiiDA plugin's setup instructions, then configure its UUID:
 
@@ -87,7 +87,7 @@ Submission returns HTTP 202 once AiiDA accepts the workflow. Invalid plans and r
 
 ## Development and build
 
-The [qcl-negf integration repository](https://github.com/AfonenkoA/qcl-negf) provides a flat set of component submodules and one generated `uv.lock` for the Python 3.14 workspace. Component versions are declared in their package metadata. Git submodule entries select component sources; Python dependencies are resolved once in the integration workspace. This repository does not carry a second Python lock or internal Git revision manifest.
+The [qcl-negf integration repository](https://github.com/Afonenko-QCL-NEGF/qcl-negf) provides a flat set of component submodules and one generated `uv.lock` for the Python 3.14 workspace. Component versions are declared in their package metadata. Git submodule entries select component sources; Python dependencies are resolved once in the integration workspace. This repository does not carry a second Python lock or internal Git revision manifest.
 
 Use Node.js 24 for the browser build. From the integration checkout, synchronize its locked environment, build the frontend, then run the backend checks:
 
@@ -111,10 +111,10 @@ The component CI checks the frontend on trusted pushes to `main` and manual disp
 
 ## Repositories
 
-- [QCLNEGF.jl](https://github.com/AfonenkoA/QCLNEGF.jl): numerical quantum transport library.
-- [QCLNEGFRunner.jl](https://github.com/AfonenkoA/QCLNEGFRunner.jl): scientific configuration, frozen plans and solver execution.
-- [qcl-negf-aiida](https://github.com/AfonenkoA/qcl-negf-aiida): execution, provenance and Slurm integration.
-- [qcl-negf-results](https://github.com/AfonenkoA/qcl-negf-results): scientific artifact validation and bounded exports.
-- [qcl-negf-platform](https://github.com/AfonenkoA/qcl-negf-platform): NixOS services and integration releases.
+- [QCLNEGF.jl](https://github.com/Afonenko-QCL-NEGF/QCLNEGF.jl): numerical quantum transport library.
+- [QCLNEGFRunner.jl](https://github.com/Afonenko-QCL-NEGF/QCLNEGFRunner.jl): scientific configuration, frozen plans and solver execution.
+- [qcl-negf-aiida](https://github.com/Afonenko-QCL-NEGF/qcl-negf-aiida): execution, provenance and Slurm integration.
+- [qcl-negf-results](https://github.com/Afonenko-QCL-NEGF/qcl-negf-results): scientific artifact validation and bounded exports.
+- [qcl-negf-platform](https://github.com/Afonenko-QCL-NEGF/qcl-negf-platform): NixOS services and integration releases.
 
 Released under the MIT license. See [LICENSE](LICENSE).

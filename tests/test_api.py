@@ -55,7 +55,7 @@ def service():
         ],
         kill_run=lambda uuid: {**record, "uuid": uuid},
         list_artifacts=lambda uuid: [
-            {"execution_id": "point_1", "path": "result.json", "size": 25}
+            {"execution_id": "point_1", "path": "result.json", "size": 26}
         ],
         open_artifact=open_artifact,
     )
@@ -157,6 +157,117 @@ def test_download_exact_artifact_and_reject_traversal(client):
     for path in ("../result.json", "/etc/passwd", "sub/../../file", "sub\\file"):
         assert client.get(url, params={**params, "path": path}, headers=AUTH).status_code == 422
     assert client.get(url, params={**params, "path": "missing"}, headers=AUTH).status_code == 404
+
+
+def test_authenticated_artifact_range_and_if_range(client):
+    url = f"/api/v1/runs/{RUN}/artifact"
+    params = {"execution_id": "point_1", "path": "result.json"}
+    response = client.get(url, params=params, headers={**AUTH, "Range": "bytes=2-6"})
+    assert response.status_code == 206
+    assert response.content == b'statu'
+    assert response.headers["content-range"] == "bytes 2-6/26"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert client.get(url, params=params, headers={"Range": "bytes=2-6"}).status_code == 401
+    for requested in ("bytes=26-", "bytes=4-2", "bytes=0-1,4-5", "nonsense"):
+        response = client.get(url, params=params, headers={**AUTH, "Range": requested})
+        assert response.status_code == 416
+        assert response.headers["content-range"] == "bytes */26"
+
+
+def test_native_artifact_capability_cannot_open_other_artifacts(client):
+    params = {"execution_id": "point_1", "path": "result.json"}
+    base = f"/api/v1/runs/{RUN}/artifact"
+    response = client.post(f"{base}/authorize", params=params, headers=AUTH)
+    assert response.status_code == 200
+    assert TOKEN not in response.text and TOKEN not in response.headers["set-cookie"]
+    assert client.get(base, params=params).status_code == 200
+    assert client.get(base, params={**params, "path": "missing"}).status_code == 401
+    assert client.get("/api/v1/runs").status_code == 401
+
+
+def test_export_request_rejects_missing_execution_and_unrecognized_profile(client):
+    url = f"/api/v1/runs/{RUN}/exports"
+    assert client.post(url, json={"execution_id": "point_1"}).status_code == 401
+    response = client.post(url, headers=AUTH, json={"execution_id": "missing"})
+    assert response.status_code == 404
+    response = client.post(
+        url, headers=AUTH, json={"execution_id": "point_1", "profile": "reduced"}
+    )
+    assert response.status_code == 422
+
+
+def test_native_export_capability_is_scoped_and_download_resumes(service, monkeypatch):
+    import hashlib
+    import time
+
+    from qcl_negf_results import export
+
+    payload = b"complete immutable archive"
+    digest = hashlib.sha256(payload).hexdigest()
+    service.list_artifacts = lambda uuid: [
+        {"execution_id": "point_1", "path": "result/native.bin", "size": 4}
+    ]
+
+    @contextmanager
+    def open_artifact(uuid, execution_id, path):
+        assert (uuid, execution_id, path) == (RUN, "point_1", "result/native.bin")
+        yield BytesIO(b"data")
+
+    service.open_artifact = open_artifact
+
+    def export_snapshot(root, destination, **kwargs):
+        assert (root / "native.bin").read_bytes() == b"data"
+        assert kwargs["profile"] == "science"
+        assert kwargs["job_status"] == "running"
+        kwargs["progress"]({"phase": "compressing", "completed_bytes": 4, "total_bytes": 4})
+        (destination / f"{digest}.tar.xz").write_bytes(payload)
+        return {
+            "schema": "qcl-negf.science-export.v3", "contract_set": "qcl-negf.results.v1",
+            "id": "point_1", "profile": "science", "snapshot_identity": "b" * 64,
+            "sha256": digest, "bytes": len(payload), "archive": f"{digest}.tar.xz",
+            "filename": "point_1-science-bbbbbbbbbbbb.tar.xz", "complete": False,
+            "transport_schema": "qcl-negf.export-archive.v1",
+        }
+
+    monkeypatch.setattr(export, "export_snapshot", export_snapshot)
+    settings = Settings(TOKEN, (CODE,), max_download_bytes=10)
+    with TestClient(create_app(settings, service), base_url="https://testserver") as client:
+        response = client.post(
+            f"/api/v1/runs/{RUN}/exports", headers=AUTH, json={"execution_id": "point_1"}
+        )
+        assert response.status_code == 202, response.text
+        identifier = response.json()["export_id"]
+        status = f"/api/v1/exports/{identifier}"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            result = client.get(status, headers=AUTH).json()
+            if result["state"] in {"ready", "failed"}:
+                break
+            time.sleep(0.01)
+        assert result["state"] == "ready", result
+        assert result["receipt"]["sha256"] == digest
+        assert "parts" not in result["receipt"]
+        url = f"{status}/download"
+        assert client.get(url).status_code == 401
+        response = client.post(f"{status}/authorize", headers=AUTH)
+        assert response.status_code == 200
+        assert response.json()["url"] == url
+        cookie = response.headers["set-cookie"]
+        assert "HttpOnly" in cookie and "SameSite=strict" in cookie and "Secure" in cookie
+        assert f"Path={url}" in cookie
+        assert TOKEN not in cookie and TOKEN not in response.text
+        assert client.get("/api/v1/config").status_code == 401
+        response = client.get(url, headers={"Range": "bytes=9-"})
+        assert response.status_code == 206
+        assert response.content == payload[9:]
+        assert response.headers["etag"] == f'"{digest}"'
+        assert response.headers["content-range"] == f"bytes 9-25/{len(payload)}"
+        response = client.get(url, headers={"Range": "bytes=9-", "If-Range": '"old"'})
+        assert response.status_code == 200
+        assert response.content == payload
+        response = client.head(url)
+        assert response.status_code == 200 and response.content == b""
+        assert response.headers["content-length"] == str(len(payload))
 
 
 def test_request_and_download_limits(service):

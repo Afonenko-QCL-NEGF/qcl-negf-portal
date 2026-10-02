@@ -9,11 +9,13 @@ import { createRoot } from "react-dom/client";
 import {
   api,
   download,
+  downloadExport,
   errorMessage,
   isTerminal,
   readableBytes,
   type Artifact,
   type Config,
+  type ExportStatus,
   type ReportEntry,
   type Resources,
   type Run,
@@ -27,6 +29,78 @@ function State({ run }: { run: Run }) {
       {label || "created"}
     </span>
   );
+}
+
+function ExportPanel({ token, uuid, executionId }: { token: string; uuid: string; executionId: string }) {
+  const [profile, setProfile] = useState<"science" | "full-state">("science");
+  const [status, setStatus] = useState<ExportStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!status || status.state !== "preparing") return;
+    let active = true;
+    const timer = setInterval(() => {
+      void api<ExportStatus>(token, `/exports/${status.export_id}`).then((value) => {
+        if (active) setStatus(value);
+      }).catch((err) => {
+        if (active) setError(errorMessage(err));
+      });
+    }, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [token, status?.export_id, status?.state]);
+
+  async function prepare() {
+    setBusy(true);
+    setError("");
+    try {
+      setStatus(await api<ExportStatus>(token, `/runs/${uuid}/exports`, {
+        execution_id: executionId, profile,
+      }));
+    } catch (err) { setError(errorMessage(err)); }
+    finally { setBusy(false); }
+  }
+
+  const progress = status?.progress;
+  return <div className="export-card">
+    <strong><code>{executionId}</code></strong>
+    <div className="export-actions">
+      <select aria-label={`Export profile for ${executionId}`} value={profile}
+        disabled={busy || status?.state === "preparing"}
+        onChange={(event) => setProfile(event.target.value as "science" | "full-state")}>
+        <option value="science">Science: stored observables and diagnostics</option>
+        <option value="full-state">Full state: physics and recovery state</option>
+      </select>
+      <button disabled={busy || status?.state === "preparing"} onClick={() => void prepare()}>
+        {busy ? "Requesting…" : "Prepare archive"}
+      </button>
+    </div>
+    {status?.state === "preparing" && <p role="status" className="muted">
+      Preparing archive: {progress?.phase.replaceAll("_", " ")}
+      {progress?.total_bytes ? ` · ${readableBytes(progress.completed_bytes ?? 0)} / ${readableBytes(progress.total_bytes)}` : ""}
+      <progress value={progress?.completed_bytes} max={progress?.total_bytes || undefined} />
+    </p>}
+    {status?.state === "failed" && <p role="alert">{status.error}</p>}
+    {status?.state === "ready" && status.receipt && <>
+      <dl>
+        <dt>Archive</dt><dd><code>{status.receipt.filename}</code></dd>
+        <dt>Size</dt><dd>{readableBytes(status.receipt.bytes)} ({status.receipt.bytes.toLocaleString()} bytes)</dd>
+        <dt>SHA-256</dt><dd><code>{status.receipt.sha256}</code></dd>
+        <dt>Snapshot</dt><dd><code>{status.receipt.snapshot_identity}</code></dd>
+      </dl>
+      <button className="primary" onClick={() => {
+        setError("");
+        void downloadExport(token, status.export_id).catch((err) => setError(errorMessage(err)));
+      }}>Download archive</button>
+      <p className="muted">
+        Transfer progress and resume are available in your browser's downloads.
+        The archive is retained until {new Date(status.expires_unix * 1000).toLocaleString()}.
+        If authorization expires, click Download archive again before resuming.
+      </p>
+      <p className="muted">Successful export verifies transport integrity. Review scientific acceptance and completeness in the archive.</p>
+    </>}
+    {error && <p role="alert">{error}</p>}
+  </div>;
 }
 
 function App() {
@@ -492,7 +566,7 @@ function App() {
                             {config &&
                             file.size > config.limits.artifact_bytes ? (
                               <span className="muted">
-                                Use repository export below
+                                Use complete archive below
                               </span>
                             ) : (
                               <button
@@ -511,6 +585,15 @@ function App() {
                       </ul>
                     ) : (
                       <p className="empty small">No retrieved files yet.</p>
+                    )}
+                    {detail.children?.some((child) => child.retrieved_uuid) && (
+                      <>
+                        <h4>Complete result archives</h4>
+                        <p className="muted">One .tar.xz file for each execution and profile. Arrays retain their native scientific values.</p>
+                        {detail.children.filter((child) => child.retrieved_uuid).map((child) =>
+                          <ExportPanel key={`${detail.uuid}/${child.uuid}`} token={token} uuid={detail.uuid} executionId={child.execution_id} />
+                        )}
+                      </>
                     )}
                     {detail.children?.some((child) => child.retrieved_uuid) && (
                       <details>
@@ -533,7 +616,7 @@ function App() {
                             </div>
                           ))}
                         <p className="muted">
-                          Create verified archive parts from the result
+                          Create one verified archive from the result
                           directory:
                         </p>
                         <pre>

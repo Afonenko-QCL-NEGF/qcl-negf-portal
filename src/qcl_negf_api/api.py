@@ -2,19 +2,23 @@
 
 import hmac
 import logging
+import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
+from urllib.parse import quote, urlencode
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
+from .exports import ExportBusy, ExportStorage, ExportStore
 from .service import AiidaService
 from .settings import Settings
 
@@ -73,6 +77,39 @@ class Submission(BaseModel):
     resources: Resources = Field(default_factory=Resources)
 
 
+class ExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    execution_id: str = Field(min_length=1, max_length=128)
+    profile: Literal["science", "full-state"] = "science"
+
+
+def byte_range(request: Request, size: int, etag: str | None = None) -> tuple[int, int, int]:
+    """Accept one byte range; never silently stream an incorrect resumed offset."""
+    value = request.headers.get("range")
+    if not value or (request.headers.get("if-range") and request.headers["if-range"] != etag):
+        return 0, size, 200
+    try:
+        if not value.startswith("bytes=") or "," in value:
+            raise ValueError
+        first, last = value[6:].split("-")
+        if not first:
+            suffix = int(last)
+            if not last.isdigit() or suffix <= 0:
+                raise ValueError
+            start, stop = max(0, size - suffix), size
+        else:
+            if not first.isdigit() or (last and not last.isdigit()):
+                raise ValueError
+            start, stop = int(first), min(size, int(last) + 1) if last else size
+        if not 0 <= start < stop <= size:
+            raise ValueError
+    except ValueError as exc:
+        raise HTTPException(416, "Requested range is unavailable", headers={
+            "Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes",
+        }) from exc
+    return start, stop, 206
+
+
 def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI:
     """Create the server; inject a service only in tests or an embedding application."""
     settings = settings or Settings.from_environment()
@@ -83,9 +120,11 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             app.state.service = AiidaService(settings.profile)
         else:
             app.state.service = service
+        app.state.exports = ExportStore(app.state.service, settings)
         try:
             yield
         finally:
+            app.state.exports.close()
             if service is None:
                 app.state.service.close()
 
@@ -99,6 +138,7 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     )
     app.add_middleware(BodyLimit, limit=settings.max_body_bytes)
     bearer = HTTPBearer(auto_error=False)
+    capability_key = secrets.token_bytes(32)
 
     @app.middleware("http")
     async def headers(request: Request, call_next):
@@ -114,17 +154,63 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             response.headers["Cache-Control"] = "no-store"
         return response
 
+    def valid_bearer(credentials: HTTPAuthorizationCredentials | None) -> bool:
+        return credentials is not None and hmac.compare_digest(
+            credentials.credentials.encode(), settings.token.encode()
+        )
+
     def authenticate(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     ) -> None:
-        if credentials is None or not hmac.compare_digest(
-            credentials.credentials.encode(), settings.token.encode()
-        ):
+        if not valid_bearer(credentials):
             raise HTTPException(
                 401, "A valid bearer token is required", headers={"WWW-Authenticate": "Bearer"}
             )
 
     protected = [Depends(authenticate)]
+
+    def grant_download(request: Request, target: str) -> JSONResponse:
+        expires = str(int(time.time()) + 3600)
+        signature = hmac.new(capability_key, f"{target}\n{expires}".encode(), "sha256").hexdigest()
+        response = JSONResponse({"url": target, "expires_unix": int(expires)})
+        response.set_cookie(
+            "qcl_download", f"{expires}.{signature}", max_age=3600,
+            path=target.split("?", 1)[0], httponly=True, samesite="strict",
+            secure=request.url.scheme == "https",
+        )
+        return response
+
+    def download_auth(request: Request, target: str, credentials) -> None:
+        if valid_bearer(credentials):
+            return
+        value = request.cookies.get("qcl_download", "")
+        try:
+            expires, signature = value.split(".")
+            expected = hmac.new(
+                capability_key, f"{target}\n{expires}".encode(), "sha256"
+            ).hexdigest()
+            if int(expires) > time.time() and hmac.compare_digest(signature, expected):
+                return
+        except (ValueError, TypeError):
+            pass
+        raise HTTPException(401, "Authorize this download again", headers={
+            "WWW-Authenticate": "Bearer",
+        })
+
+    def export_call(request: Request, method: str, *args: Any) -> Any:
+        try:
+            return getattr(request.app.state.exports, method)(*args)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ExportBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ExportStorage as exc:
+            raise HTTPException(507, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except RuntimeError as exc:
+            LOG.exception("Archive service unavailable")
+            raise HTTPException(503, "Archive service is unavailable") from exc
     resource_defaults = {
         **Resources().model_dump(),
         "max_memory_kb": settings.default_memory_kb,
@@ -164,6 +250,10 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
                 "max_memory_kb": settings.max_memory_kb,
                 "plan_bytes": settings.max_body_bytes - 1024,
                 "artifact_bytes": settings.max_download_bytes,
+            },
+            "exports": {
+                "disk_bytes": settings.export_disk_bytes,
+                "ttl_seconds": settings.export_ttl_seconds,
             },
         }
 
@@ -219,16 +309,11 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     def artifacts(request: Request, run_uuid: UUID) -> dict:
         return {"artifacts": invoke(request, "list_artifacts", str(run_uuid))}
 
-    @app.get("/api/v1/runs/{run_uuid}/artifact", dependencies=protected)
-    def artifact(
-        request: Request,
-        run_uuid: UUID,
-        execution_id: str = Query(min_length=1, max_length=128),
-        path: str = Query(min_length=1, max_length=1024),
-    ) -> StreamingResponse:
+    def artifact_entry(request: Request, run_uuid: UUID, execution_id: str, path: str) -> dict:
         relative = PurePosixPath(path)
-        if relative.is_absolute() or ".." in relative.parts or "\\" in path:
-            raise HTTPException(422, "Artifact path must be relative")
+        if (relative.is_absolute() or ".." in relative.parts or "\\" in path
+                or str(relative) != path):
+            raise HTTPException(422, "Artifact path must be normalized and relative")
         entries = invoke(request, "list_artifacts", str(run_uuid))
         entry = next(
             (
@@ -243,31 +328,102 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
         if entry["size"] > settings.max_download_bytes:
             raise HTTPException(
                 413,
-                "Artifact exceeds the browser download limit. Export the retrieved repository "
-                "with verdi node repo dump on the control host, then use qcl-negf-results export.",
+                "Artifact exceeds the individual file limit. Prepare a complete result archive.",
+            )
+        return entry
+
+    def stream_file(request: Request, opener, size: int, name: str, etag=None) -> Response:
+        start, stop, status = byte_range(request, size, etag)
+        filename = "".join(c for c in name if c.isascii() and (c.isalnum() or c in "._-"))
+        disposition = f'attachment; filename="{filename or "artifact"}"'
+        if name != filename:
+            disposition += f"; filename*=UTF-8''{quote(name, safe='')}"
+        headers = {
+            "Content-Disposition": disposition,
+            "Content-Length": str(stop - start),
+            "Accept-Ranges": "bytes",
+        }
+        if etag:
+            headers["ETag"] = etag
+        if status == 206:
+            headers["Content-Range"] = f"bytes {start}-{stop - 1}/{size}"
+        if request.method == "HEAD":
+            return Response(
+                status_code=status, headers=headers, media_type="application/octet-stream"
             )
 
         def chunks():
-            with request.app.state.service.open_artifact(
-                str(run_uuid), execution_id, path
-            ) as stream:
-                remaining = settings.max_download_bytes
-                while data := stream.read(min(65536, remaining + 1)):
-                    if len(data) > remaining:
-                        raise RuntimeError("Artifact exceeded configured download limit")
+            with opener() as stream:
+                stream.seek(start)
+                remaining = stop - start
+                while remaining:
+                    data = stream.read(min(65536, remaining))
+                    if not data or len(data) > remaining:
+                        raise RuntimeError("Artifact differs from the declared byte length")
                     remaining -= len(data)
                     yield data
-
-        # An ASCII fallback avoids header injection and filesystem disclosure.
-        filename = "".join(c for c in relative.name if c.isascii() and (c.isalnum() or c in "._-"))
         return StreamingResponse(
-            chunks(),
-            media_type="application/octet-stream",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename or "artifact"}"',
-                "Content-Length": str(entry["size"]),
-                "X-Content-Type-Options": "nosniff",
-            },
+            chunks(), status_code=status, media_type="application/octet-stream", headers=headers,
+        )
+
+    def artifact_target(run_uuid: UUID, execution_id: str, path: str) -> str:
+        query = urlencode({"execution_id": execution_id, "path": path})
+        return f"/api/v1/runs/{run_uuid}/artifact?{query}"
+
+    @app.post("/api/v1/runs/{run_uuid}/artifact/authorize", dependencies=protected)
+    def authorize_artifact(
+        request: Request, run_uuid: UUID,
+        execution_id: str = Query(min_length=1, max_length=128),
+        path: str = Query(min_length=1, max_length=1024),
+    ) -> JSONResponse:
+        artifact_entry(request, run_uuid, execution_id, path)
+        return grant_download(request, artifact_target(run_uuid, execution_id, path))
+
+    @app.get("/api/v1/runs/{run_uuid}/artifact")
+    @app.head("/api/v1/runs/{run_uuid}/artifact", include_in_schema=False)
+    def artifact(
+        request: Request, run_uuid: UUID,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+        execution_id: str = Query(min_length=1, max_length=128),
+        path: str = Query(min_length=1, max_length=1024),
+    ) -> Response:
+        download_auth(request, artifact_target(run_uuid, execution_id, path), credentials)
+        entry = artifact_entry(request, run_uuid, execution_id, path)
+        return stream_file(
+            request, lambda: request.app.state.service.open_artifact(
+                str(run_uuid), execution_id, path
+            ), entry["size"], PurePosixPath(path).name,
+        )
+
+    @app.post("/api/v1/runs/{run_uuid}/exports", dependencies=protected, status_code=202)
+    def prepare_export(request: Request, run_uuid: UUID, body: ExportRequest) -> dict:
+        return export_call(request, "create", str(run_uuid), body.execution_id, body.profile)
+
+    @app.get("/api/v1/exports/{export_id}", dependencies=protected)
+    def export_status(request: Request, export_id: UUID) -> dict:
+        return export_call(request, "get", str(export_id))
+
+    @app.post("/api/v1/exports/{export_id}/authorize", dependencies=protected)
+    def authorize_export(request: Request, export_id: UUID) -> JSONResponse:
+        entry = export_call(request, "get", str(export_id))
+        if entry["state"] != "ready":
+            raise HTTPException(409, "The archive is not ready for download")
+        return grant_download(request, f"/api/v1/exports/{export_id}/download")
+
+    @app.get("/api/v1/exports/{export_id}/download")
+    @app.head("/api/v1/exports/{export_id}/download", include_in_schema=False)
+    def export_download(
+        request: Request, export_id: UUID,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ) -> Response:
+        download_auth(request, f"/api/v1/exports/{export_id}/download", credentials)
+        entry = export_call(request, "get", str(export_id))
+        if entry["state"] != "ready":
+            raise HTTPException(409, "The archive is not ready for download")
+        receipt = entry["receipt"]
+        return stream_file(
+            request, lambda: request.app.state.exports.open(str(export_id)),
+            receipt["bytes"], receipt["filename"], f'"{receipt["sha256"]}"',
         )
 
     static = Path(__file__).parent / "static"

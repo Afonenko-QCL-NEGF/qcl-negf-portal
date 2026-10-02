@@ -29,6 +29,11 @@ class _ArtifactReader:
             raise ValueError("Artifact reads must use chunks of at most 65536 bytes")
         return self._actor._executor.submit(self._handle.read, size).result()
 
+    def seek(self, offset: int) -> int:
+        if type(offset) is not int or offset < 0:
+            raise ValueError("Artifact seek requires a nonnegative byte offset")
+        return self._actor._executor.submit(self._handle.seek, offset).result()
+
 
 class AiidaService:
     """Serialize calls to the process-global AiiDA manager behind the HTTP layer.

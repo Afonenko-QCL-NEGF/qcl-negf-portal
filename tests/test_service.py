@@ -30,6 +30,10 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
             record("read")
             return super().read(size)
 
+        def seek(self, offset, whence=0):
+            record("seek")
+            return super().seek(offset, whence)
+
     @contextmanager
     def open_artifact(*args):
         record("open")
@@ -53,6 +57,9 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
             futures = [clients.submit(actor.list_runs, limit=10) for _ in range(8)]
             assert all(future.result() == [] for future in futures)
         with actor.open_artifact("run", "execution", "result") as stream:
+            stream.seek(1)
+            assert stream.read(2) == b"at"
+            stream.seek(0)
             assert stream.read(4) == b"data"
     finally:
         actor.close()
@@ -61,6 +68,9 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         "load",
         *(["list"] * 8),
         "open",
+        "seek",
+        "read",
+        "seek",
         "read",
         "close",
         "unload",

@@ -11,7 +11,7 @@ A web interface for quantum transport calculations run by [AiiDA](https://www.ai
 
 The AiiDA plugin accepts ordinary frozen plans. Campaign plans and evidence-gated campaigns are not exposed by this interface. Solver configuration editing and numerical analysis are performed with the solver and `qcl-negf-results` tools. A finished process can still have an unsuccessful scientific outcome: inspect the result status and diagnostics.
 
-The repository contains two modules with one release cycle: `frontend/` builds a static React/TypeScript application, and `src/qcl_negf_api/` provides the authenticated FastAPI gateway. The compiled browser bundle is included in the Python wheel and served from the same origin. There is one service in production; Node.js is a build dependency. The gateway owns authentication and request admission, while the AiiDA plugin owns execution and provenance. A dedicated thread owns AiiDA's profile, event loop and repository handles; HTTP worker threads do not share mutable AiiDA state. The portal has no scheduler, SSH client, execution queue or mutable result cache.
+The repository contains two modules with one release cycle: `frontend/` builds a static React/TypeScript application, and `src/qcl_negf_api/` provides the authenticated FastAPI gateway. The compiled browser bundle is included in the Python wheel and served from the same origin. There is one service in production; Node.js is a build dependency. The gateway owns authentication and request admission, while the AiiDA plugin owns execution and provenance. A dedicated thread owns AiiDA's profile, event loop and repository handles; HTTP worker threads do not share mutable AiiDA state. The portal has no scheduler, SSH client or execution queue. One preparation worker copies an immutable retrieved repository to temporary storage and asks `qcl-negf-results` to build a verified archive. Artifact selection and validation remain in results and its contracts.
 
 ## Install
 
@@ -37,7 +37,7 @@ Run the portal as the same operating-system user that owns the AiiDA profile. `A
 
 An administrator can set `QCL_NEGF_SCRATCH_ROOT` to an absolute normalized path such as `/scratch/qcl-negf`. It designates worker-local scratch storage for QCLNEGFRunner and must be writable on every eligible compute node. The path is site configuration, is recorded by the AiiDA execution, and cannot be supplied by an HTTP client. The API host does not need this worker-local directory.
 
-Place a TLS reverse proxy in front of the loopback listener. API requests require the bearer token, including read operations and the OpenAPI document. The browser keeps the token in memory only. This is a shared trusted-research-group interface: a token grants access to all QCL-NEGF workflows in the configured AiiDA profile, including submission and cancellation. Use separate profiles and service instances when separate access domains are needed.
+Place a TLS reverse proxy in front of the loopback listener. API requests require the bearer token, including read operations and the OpenAPI document. The browser keeps the token in memory only. Native browser downloads use a one-hour HttpOnly cookie capability bound to the exact artifact or archive; it cannot authorize other API operations. Cookies have SameSite=Strict and use Secure over HTTPS. Their URLs never contain the bearer token or the capability. This is a shared trusted-research-group interface: a token grants access to all QCL-NEGF workflows in the configured AiiDA profile, including submission and cancellation. Use separate profiles and service instances when separate access domains are needed.
 
 ## Resource and data limits
 
@@ -50,24 +50,30 @@ Place a TLS reverse proxy in front of the loopback listener. API requests requir
 | `QCL_NEGF_DEFAULT_MEMORY_KB` | 4194304 | Initial memory request (KiB), also used when omitted in API requests |
 | `QCL_NEGF_MAX_MEMORY_KB` | 134217728 | Maximum requested memory per execution (KiB) |
 | `QCL_NEGF_MAX_BODY_BYTES` | 2000000 | Request body limit, including chunked requests |
-| `QCL_NEGF_MAX_DOWNLOAD_BYTES` | 200000000 | Maximum single retrieved-artifact download |
+| `QCL_NEGF_MAX_DOWNLOAD_BYTES` | 200000000 | Maximum individual retrieved-file download; complete archives have separate storage admission |
+| `QCL_NEGF_EXPORT_DISK_BYTES` | 107374182400 | Export storage admission budget, including preparation and retained archives (100 GiB) |
+| `QCL_NEGF_EXPORT_TTL_SECONDS` | 86400 | Ready archive retention after preparation (24 hours) |
 
 These are admission limits; Slurm performs resource allocation. Each execution uses one machine and one process; these two limits must remain one. Parallel work is distributed as independent executions across Slurm nodes. Configure core, memory and time ceilings for the cluster partition. The initial memory request is 4 GiB, is configurable on the control host and can be adjusted in the submission form. Match these defaults and ceilings to the actual compute-node memory.
 
 Only artifacts registered in the workflow's AiiDA retrieved repositories can be downloaded. Arbitrary host paths are not accepted. Large physical arrays remain available through the scientific result artifacts and `qcl-negf-results`; the browser displays structured result summaries and reports.
 
-For complete datasets exceeding the browser limit, expand **Export complete repositories** in the workflow view. It gives the retrieved repository UUID for each execution. Run the displayed command on the control host as the AiiDA profile owner:
+Use **Complete result archives** to prepare one `.tar.xz` file for an execution with the `science` or `full-state` profile. The portal displays preparation progress, finalized size, SHA-256 and snapshot identity. Downloads go directly through the browser's download manager; JavaScript never accumulates the complete file in a Blob. The authenticated endpoint supports one HTTP byte range and a SHA-256 ETag for `If-Range`. Browser transfer progress and resume controls depend on the browser. If a resume needs fresh authorization, click **Download archive** again. Renewing authorization does not prepare a new archive.
+
+Preparation refuses the complete retrieved dataset before copying when the conservative reservation (four times its inventoried bytes plus 256 MiB) exceeds the configured admission budget or free temporary storage. This reservation accounts for the retrieved copy, exporter spool, derived objects and final archive; it is not a filesystem quota. Archive-byte progress also aborts if the reserved space is exceeded. Other disk users or a derived object's expansion can still exhaust the filesystem, which fails preparation and removes temporary output. Deployments requiring a hard aggregate limit should apply a filesystem quota to the service's temporary storage. The portal does not discard source files to fit the budget. Only one archive is prepared at a time. Retained archives count against subsequent admission; expired archives are removed on the next export operation when no download holds them open. Service restart clears this temporary cache and invalidates capabilities, so a transfer cannot resume across a restart.
+
+The control-host fallback remains under **Export complete repositories**. It gives the retrieved repository UUID for each execution. Run the displayed command as the AiiDA profile owner:
 
 ```console
 verdi -p qcl-negf node repo dump RETRIEVED_UUID ./retrieved-run
 qcl-negf-results export ./retrieved-run/result ./exports --profile science
 ```
 
-The output directory for `verdi node repo dump` must not exist. Choose a different directory for each execution. `qcl-negf-results export` creates checksummed archive parts of at most 200,000,000 bytes without changing the native scientific values. Its default status is `running`; supply `--status completed` only when that status is established by the scientific result. The `full-state` profile also retains full physics and recovery state. Copy the completed part set using your normal file-transfer tool and verify it with `qcl-negf-receive` on the receiving machine.
+The output directory for `verdi node repo dump` must not exist. Choose a different directory for each execution. `qcl-negf-results export` creates one checksummed archive without changing native scientific values. Its default status is `running`; supply `--status completed` only when that status is established by the scientific result. The `full-state` profile also retains full physics and recovery state. Copy the archive and its receipt using your normal file-transfer tool and verify them with `qcl-negf-receive` on the receiving machine. Export success establishes archive integrity, not numerical convergence or scientific acceptance.
 
 ## HTTP API
 
-All `/api/v1/` routes require `Authorization: Bearer TOKEN`. The authenticated OpenAPI schema is at `/api/v1/openapi.json`.
+All `/api/v1/` operations require `Authorization: Bearer TOKEN`, except GET/HEAD of an exact download previously authorized by its short-lived cookie. The authenticated OpenAPI schema is at `/api/v1/openapi.json`.
 
 | Method | Path | Operation |
 | --- | --- | --- |
@@ -79,11 +85,20 @@ All `/api/v1/` routes require `Authorization: Bearer TOKEN`. The authenticated O
 | GET | `/api/v1/runs/{uuid}/report` | Process report entries |
 | POST | `/api/v1/runs/{uuid}/kill` | Request cancellation |
 | GET | `/api/v1/runs/{uuid}/artifacts` | Retrieved file inventory |
-| GET | `/api/v1/runs/{uuid}/artifact?execution_id=…&path=…` | Download an inventoried file |
+| POST | `/api/v1/runs/{uuid}/artifact/authorize?execution_id=…&path=…` | Authorize a native browser download of one inventoried file |
+| GET/HEAD | `/api/v1/runs/{uuid}/artifact?execution_id=…&path=…` | Stream an inventoried file, with single-byte-range support |
+| POST | `/api/v1/runs/{uuid}/exports` | Prepare `{execution_id, profile}`; default profile `science`, alternative `full-state` |
+| GET | `/api/v1/exports/{export_id}` | Preparation state/progress, or v3 archive receipt |
+| POST | `/api/v1/exports/{export_id}/authorize` | Set a scoped download cookie and return its credential-free URL |
+| GET/HEAD | `/api/v1/exports/{export_id}/download` | Stream the archive, with Range and If-Range support |
 
 The `plan` field is a string containing the original frozen JSON file, not a parsed nested object. This preserves the exact numerical representation and fingerprint across the browser, API and AiiDA repository.
 
 Submission returns HTTP 202 once AiiDA accepts the workflow. Invalid plans and resource requests return 422; an unapproved Code returns 403; broker unavailability returns 503. Submission is not automatically retried: submitting the same plan again creates a new provenance record. A cancellation request is asynchronous; refresh the workflow to see its eventual state.
+
+Export requests return 202 with an `export_id` and state. The same run/execution/profile reuses an unexpired preparation or ready archive. A busy preparation worker returns 409; insufficient storage admission returns 507. Failed preparation is reported explicitly and never publishes a download. No numerical solver is invoked during export. Scientific completion is supplied only from a terminal scientific result status, never from AiiDA's process exit code. Unsupported or missing scientific status remains `running` for export completeness.
+
+Failed preparation can be retried by an explicit request; the portal never retries it automatically. During service shutdown, copying and compression cancel at the next progress callback and temporary output is removed. Operations within a validator or compaction phase finish until their next callback; shutdown is cooperative.
 
 ## Development and build
 

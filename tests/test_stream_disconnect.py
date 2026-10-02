@@ -47,6 +47,7 @@ async def test_asgi_disconnect_closes_reader_and_releases_export_lease(
         ],
         open_artifact=open_artifact,
         get_run=lambda run: {"results": {}},
+        get_export_plan=lambda run, execution: {"plan": b"{}", "source": "aiida.input.plan"},
     )
 
     def export_snapshot(root, destination, **kwargs):

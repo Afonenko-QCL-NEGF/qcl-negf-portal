@@ -12,6 +12,7 @@ OPERATIONS = frozenset(
     {
         "list_runs",
         "get_run",
+        "get_export_plan",
         "submit_plan",
         "get_run_report",
         "kill_run",

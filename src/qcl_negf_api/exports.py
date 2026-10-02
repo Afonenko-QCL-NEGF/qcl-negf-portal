@@ -33,6 +33,10 @@ class ExportStorage(ValueError):
     """The source snapshot cannot fit the configured storage admission budget."""
 
 
+class ExportPlan(RuntimeError):
+    """A new archive cannot silently omit its frozen input provenance."""
+
+
 class ExportStore:
     def __init__(self, service: Any, settings: Settings) -> None:
         self.service, self.settings = service, settings
@@ -125,6 +129,13 @@ class ExportStore:
         try:
             from qcl_negf_results.export import export_snapshot
 
+            try:
+                frozen = self.service.get_export_plan(entry["run_uuid"], entry["execution_id"])
+            except (LookupError, ValueError, OSError) as exception:
+                raise ExportPlan(
+                    "Frozen plan is unavailable or invalid; export refused"
+                ) from exception
+
             source.mkdir(parents=True)
             output.mkdir()
             self._progress(identifier, {"phase": "retrieving"})
@@ -156,6 +167,7 @@ class ExportStore:
             receipt = export_snapshot(
                 source / "result", output, profile=entry["profile"],
                 job_id=entry["execution_id"], job_status=status,
+                plan=frozen["plan"], plan_source=frozen["source"],
                 progress=lambda progress: self._progress(identifier, progress),
             )
             validate_export_receipt(receipt)
@@ -173,10 +185,15 @@ class ExportStore:
             else:
                 LOG.exception("Archive preparation failed for export %s", identifier)
             shutil.rmtree(directory, ignore_errors=True)
+            error = (
+                "Frozen plan is unavailable or invalid; inspect the control host service log"
+                if isinstance(exc, ExportPlan) else
+                "Archive preparation failed; inspect the control host service log"
+            )
             with self._lock:
                 entry.update(
                     state="failed", reserved=0,
-                    error="Archive preparation failed; inspect the control host service log",
+                    error=error,
                 )
 
     @contextmanager

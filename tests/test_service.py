@@ -25,6 +25,10 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         record("list")
         return []
 
+    def get_export_plan(*args):
+        record("plan")
+        return {"plan": b"frozen bytes", "source": "aiida.input.plan"}
+
     class Stream(BytesIO):
         def read(self, size):
             record("read")
@@ -42,7 +46,9 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         finally:
             record("close")
 
-    plugin = SimpleNamespace(list_runs=list_runs, open_artifact=open_artifact)
+    plugin = SimpleNamespace(
+        list_runs=list_runs, open_artifact=open_artifact, get_export_plan=get_export_plan
+    )
     monkeypatch.setattr(aiida, "load_profile", load_profile)
     monkeypatch.setattr("qcl_negf_api.service.import_module", lambda name: plugin)
     monkeypatch.setattr(
@@ -56,6 +62,7 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         with ThreadPoolExecutor(max_workers=4) as clients:
             futures = [clients.submit(actor.list_runs, limit=10) for _ in range(8)]
             assert all(future.result() == [] for future in futures)
+        assert actor.get_export_plan("run", "execution")["plan"] == b"frozen bytes"
         with actor.open_artifact("run", "execution", "result") as stream:
             stream.seek(1)
             assert stream.read(2) == b"at"
@@ -67,6 +74,7 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
     assert [event[0] for event in events] == [
         "load",
         *(["list"] * 8),
+        "plan",
         "open",
         "seek",
         "read",

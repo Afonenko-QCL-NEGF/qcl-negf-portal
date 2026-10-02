@@ -50,6 +50,9 @@ def service():
         list_runs=lambda **kwargs: [record],
         submit_plan=submit,
         get_run=get_run,
+        get_export_plan=lambda run, execution: {
+            "plan": b'{ "frozen": 1.234567890123456789 }\n', "source": "aiida.input.plan",
+        },
         get_run_report=lambda uuid: [
             {"level": "REPORT", "message": "Calculation submitted", "time": "2026-01-01T00:00:00Z"}
         ],

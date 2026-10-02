@@ -4,17 +4,20 @@ import hmac
 import logging
 import secrets
 import time
+from collections.abc import Generator
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlencode
 from uuid import UUID
 
+import anyio
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
@@ -23,6 +26,23 @@ from .service import AiidaService
 from .settings import Settings
 
 LOG = logging.getLogger(__name__)
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    """Release a synchronous reader even when ASGI cancels the response."""
+
+    def __init__(self, content: Generator[bytes], **kwargs: Any) -> None:
+        self._content = content
+        super().__init__(content, **kwargs)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Starlette's threadpool iterator waits for an in-flight next() on
+            # cancellation, but does not close the underlying generator.
+            with anyio.CancelScope(shield=True):
+                await run_in_threadpool(self._content.close)
 
 
 class BodyLimit:
@@ -362,7 +382,7 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
                         raise RuntimeError("Artifact differs from the declared byte length")
                     remaining -= len(data)
                     yield data
-        return StreamingResponse(
+        return ClosingStreamingResponse(
             chunks(), status_code=status, media_type="application/octet-stream", headers=headers,
         )
 

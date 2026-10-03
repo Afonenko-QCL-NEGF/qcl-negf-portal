@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from qcl_negf_contracts.artifacts import validate_export_receipt
 from qcl_negf_contracts.messages import TERMINAL
+from qcl_negf_results.export_budget import DEFAULT_RESERVE_BYTES
 
 from .settings import Settings
 
@@ -57,7 +58,24 @@ class ExportStore:
 
     @staticmethod
     def _public(entry: dict[str, Any]) -> dict[str, Any]:
-        return {key: value for key, value in entry.items() if key not in {"readers", "reserved"}}
+        return {key: value for key, value in entry.items()
+                if key not in {"readers", "reserved", "source_bytes"}}
+
+    @staticmethod
+    def _stored_bytes(directory: Path) -> int:
+        return sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
+
+    def _storage(self, identifier: str, owned: int, additional: int = 0) -> int:
+        """Observe remaining logical bytes/free space; this is not an OS quota."""
+        with self._lock:
+            entry = self._entries[identifier]
+            other = sum(value["reserved"] for key, value in self._entries.items()
+                        if key != identifier)
+            remaining = min(entry["reserved"], self.settings.export_disk_bytes - other) - owned
+            free = shutil.disk_usage(self._root).free - DEFAULT_RESERVE_BYTES
+            if additional > remaining or additional > free:
+                raise ExportStorage("Preparation exceeds reserved export storage or free space")
+            return min(remaining, free)
 
     def get(self, identifier: str) -> dict[str, Any]:
         with self._lock:
@@ -98,14 +116,14 @@ class ExportStore:
                 raise ExportBusy("Another archive is being prepared; try again after it finishes")
             used = sum(entry["reserved"] for entry in self._entries.values())
             if (len(self._entries) >= 128 or used + reservation > self.settings.export_disk_bytes
-                    or reservation > shutil.disk_usage(self._root).free):
+                    or reservation + DEFAULT_RESERVE_BYTES > shutil.disk_usage(self._root).free):
                 raise ExportStorage("Complete retrieved snapshot exceeds available export storage")
             identifier = str(uuid4())
             entry = {
                 "export_id": identifier, "run_uuid": run, "execution_id": execution_id,
                 "profile": profile, "state": "preparing", "progress": {"phase": "retrieving"},
                 "expires_unix": time.time() + self.settings.export_ttl_seconds,
-                "reserved": reservation, "readers": 0,
+                "reserved": reservation, "readers": 0, "source_bytes": source_bytes,
             }
             self._entries[identifier] = entry
             self._executor.submit(self._prepare, identifier, entries, source_bytes)
@@ -117,9 +135,9 @@ class ExportStore:
         with self._lock:
             entry = self._entries[identifier]
             entry["progress"] = dict(progress)
-            # Actual compression bytes are reported at bounded write intervals.
-            if progress.get("archive_bytes", 0) > entry["reserved"]:
-                raise ExportStorage("Archive exceeds reserved export storage")
+            # Results temporary_bytes already includes its compressed archive.
+            temporary = max(progress.get("temporary_bytes", 0), progress.get("archive_bytes", 0))
+            self._storage(identifier, entry["source_bytes"] + temporary)
 
     def _prepare(self, identifier: str, inventory: list[dict[str, Any]], total: int) -> None:
         with self._lock:
@@ -151,6 +169,7 @@ class ExportStore:
                         copied += len(data)
                         if copied > item["size"]:
                             raise ValueError("Retrieved artifact size differs from inventory")
+                        self._storage(identifier, count, len(data))
                         handle.write(data)
                         count += len(data)
                         self._progress(identifier, {
@@ -164,20 +183,27 @@ class ExportStore:
             status = result.get("status", "running") if isinstance(result, dict) else "running"
             # Process exit status is not evidence of scientific completion.
             status = status if status in TERMINAL else "running"
+            byte_budget = self._storage(identifier, total)
+            if byte_budget <= 0:
+                raise ExportStorage("No export spool budget remains after the retrieved copy")
             receipt = export_snapshot(
                 source / "result", output, profile=entry["profile"],
                 job_id=entry["execution_id"], job_status=status,
                 plan=frozen["plan"], plan_source=frozen["source"],
+                byte_budget=byte_budget, reserve_bytes=DEFAULT_RESERVE_BYTES,
                 progress=lambda progress: self._progress(identifier, progress),
             )
             validate_export_receipt(receipt)
             archive = output / receipt["archive"]
-            if (archive.stat().st_size != receipt["bytes"]
-                    or receipt["bytes"] > entry["reserved"]):
-                raise ValueError("Archive size differs from receipt or storage reservation")
+            if archive.stat().st_size != receipt["bytes"]:
+                raise ValueError("Archive size differs from receipt")
+            # Reconcile receipt/metadata tails and any remaining spool before ready.
+            self._storage(identifier, self._stored_bytes(directory))
             shutil.rmtree(source)
+            retained = self._stored_bytes(directory)
             with self._lock:
-                entry.update(state="ready", receipt=receipt, reserved=receipt["bytes"],
+                self._storage(identifier, retained)
+                entry.update(state="ready", receipt=receipt, reserved=retained,
                              expires_unix=time.time() + self.settings.export_ttl_seconds)
         except Exception as exc:
             if isinstance(exc, CancelledError):

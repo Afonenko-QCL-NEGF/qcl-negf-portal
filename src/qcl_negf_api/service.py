@@ -12,6 +12,7 @@ OPERATIONS = frozenset(
     {
         "list_runs",
         "get_run",
+        "get_export_plan",
         "submit_plan",
         "get_run_report",
         "kill_run",
@@ -28,6 +29,11 @@ class _ArtifactReader:
         if not 0 <= size <= 65536:
             raise ValueError("Artifact reads must use chunks of at most 65536 bytes")
         return self._actor._executor.submit(self._handle.read, size).result()
+
+    def seek(self, offset: int) -> int:
+        if type(offset) is not int or offset < 0:
+            raise ValueError("Artifact seek requires a nonnegative byte offset")
+        return self._actor._executor.submit(self._handle.seek, offset).result()
 
 
 class AiidaService:

@@ -26,6 +26,7 @@ export interface Config {
   profile: string;
   codes: string[];
   limits: Resources & { plan_bytes: number; artifact_bytes: number };
+  exports: { disk_bytes: number; ttl_seconds: number };
 }
 export interface Artifact {
   execution_id: string;
@@ -36,6 +37,26 @@ export interface ReportEntry {
   level: string;
   message: string;
   time: string;
+}
+export interface ExportReceipt {
+  schema: string;
+  transport_schema: string;
+  filename: string;
+  sha256: string;
+  bytes: number;
+  snapshot_identity: string;
+  profile: "science" | "full-state";
+  complete: boolean;
+}
+export interface ExportStatus {
+  export_id: string;
+  execution_id: string;
+  profile: "science" | "full-state";
+  state: "preparing" | "ready" | "failed";
+  progress: { phase: string; completed_bytes?: number; total_bytes?: number };
+  receipt?: ExportReceipt;
+  error?: string;
+  expires_unix: number;
 }
 
 export function errorMessage(value: unknown): string {
@@ -88,22 +109,20 @@ export async function download(
     execution_id: artifact.execution_id,
     path: artifact.path,
   });
-  const response = await fetch(`/api/v1/runs/${uuid}/artifact?${query}`, {
-    headers: { Authorization: `Bearer ${token}` },
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(
-      payload ? describeDetail(payload.detail) : `HTTP ${response.status}`,
-    );
-  }
-  const url = URL.createObjectURL(await response.blob());
+  await nativeDownload(token, `/runs/${uuid}/artifact/authorize?${query}`);
+}
+
+export async function downloadExport(token: string, exportId: string): Promise<void> {
+  await nativeDownload(token, `/exports/${exportId}/authorize`);
+}
+
+async function nativeDownload(token: string, path: string): Promise<void> {
+  const { url } = await api<{ url: string }>(token, path, {});
+  if (!url.startsWith("/api/v1/")) throw new Error("Invalid download address.");
   const link = document.createElement("a");
   link.href = url;
-  link.download = artifact.path.split("/").pop() || "artifact";
+  link.download = "";
   link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export function isTerminal(run: Run): boolean {
@@ -113,5 +132,6 @@ export function isTerminal(run: Run): boolean {
 export function readableBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
+  if (size >= 1024 * 1024 * 1024) return `${(size / 1024 / 1024 / 1024).toFixed(1)} GiB`;
   return `${(size / 1024 / 1024).toFixed(1)} MiB`;
 }

@@ -113,14 +113,27 @@ Use Node.js 24 for the browser build. From the integration checkout, synchronize
 ```console
 uv sync --locked --all-packages --all-groups --all-extras
 cd components/qcl-negf-portal
-deno run --allow-run=npm scripts/ci.ts
+deno task test:frontend
 cd ../..
 uv run --locked --package qcl-negf-api python -m pytest components/qcl-negf-portal/tests
 uv run --locked --package qcl-negf-api ruff check components/qcl-negf-portal/src components/qcl-negf-portal/tests components/qcl-negf-portal/hatch_build.py
 uv run --locked --package qcl-negf-api python -m build --no-isolation components/qcl-negf-portal
 ```
 
-The frontend can also be checked independently from this repository with `deno run --allow-run=npm scripts/ci.ts`. It installs `frontend/package-lock.json` with `npm ci`, runs browser client tests and TypeScript checks, and builds the static bundle. It does not install unpublished Python dependencies.
+The frontend can also be checked independently from this repository with `deno task test:frontend`. It installs `frontend/package-lock.json` with `npm ci`, runs browser client tests and TypeScript checks, and builds the static bundle. It does not install unpublished Python dependencies. npm receives only `PATH`, `HOME`
+and the optional `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` variables and their lowercase
+variants. The task reads those named variables with scoped permissions and clears the
+child environment, keeping runner-specific native loader settings out of Node.
+Other npm configuration should be supplied through the project's or user's npm config,
+not arbitrary inherited environment variables. This does not change the runner or the
+Python environment. The command-contract regression uses a local npm substitute:
+
+```console
+python3 -m unittest discover -s tests -p test_ci_environment.py
+```
+
+It checks argument order, working directory, the explicit environment and exit propagation
+without installing packages, contacting a registry or building frontend assets.
 
 `npm run build` writes assets to `src/qcl_negf_api/static/`, which the wheel includes. Release wheel construction rejects missing browser assets. Editable development installation permits the API to run before the browser is built. Generated assets and dependency directories are ignored by Git. `nix/frontend.nix` builds browser assets with the verified npm dependency hash committed alongside the recipe. The platform uses this derivation when building the API wheel from the same root `uv.lock`; Python dependencies are not declared again in a separate Nix package definition. After updating `frontend/package-lock.json`, run `deno task lock:nix` in the Nix development shell to regenerate `nix/generated-npm-hash.json`; do not edit its hash manually.
 

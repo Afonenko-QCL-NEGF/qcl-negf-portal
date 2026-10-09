@@ -25,7 +25,7 @@ test("download delegates streaming to the browser without buffering a Blob", asy
   const originalFetch = globalThis.fetch;
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
   const clicks: string[] = [];
-  const url = "/api/v1/runs/workflow/artifact?execution_id=point_1&path=result.bin";
+  const url = "/api/v1/runs/workflow/artifact?execution_id=point_1&path=result.bin&attempt=2&calcjob_uuid=exact-child";
   globalThis.fetch = async (input, init) => {
     assert.equal(String(input), `${url.replace("/artifact?", "/artifact/authorize?")}`);
     assert.equal(init?.method, "POST");
@@ -42,7 +42,7 @@ test("download delegates streaming to the browser without buffering a Blob", asy
     },
   });
   try {
-    await download("secret", "workflow", { execution_id: "point_1", path: "result.bin", size: 1 });
+    await download("secret", "workflow", { execution_id: "point_1", path: "result.bin", size: 1, attempt: 2, calcjob_uuid: "exact-child" });
     assert.deepEqual(clicks, [url]);
   } finally {
     globalThis.fetch = originalFetch;

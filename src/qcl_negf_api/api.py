@@ -329,22 +329,14 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     def artifacts(request: Request, run_uuid: UUID) -> dict:
         return {"artifacts": invoke(request, "list_artifacts", str(run_uuid))}
 
-    def artifact_entry(request: Request, run_uuid: UUID, execution_id: str, path: str) -> dict:
+    def artifact_entry(request: Request, run_uuid: UUID, execution_id: str, path: str,
+                       *, attempt=None, calcjob_uuid=None) -> dict:
         relative = PurePosixPath(path)
         if (relative.is_absolute() or ".." in relative.parts or "\\" in path
                 or str(relative) != path):
             raise HTTPException(422, "Artifact path must be normalized and relative")
-        entries = invoke(request, "list_artifacts", str(run_uuid))
-        entry = next(
-            (
-                item
-                for item in entries
-                if (item["execution_id"] == execution_id and item["path"] == path)
-            ),
-            None,
-        )
-        if entry is None:
-            raise HTTPException(404, "Artifact was not found")
+        entry = invoke(request, "get_artifact_metadata", str(run_uuid), execution_id, path,
+                       attempt=attempt, calcjob_uuid=str(calcjob_uuid) if calcjob_uuid is not None else None)
         if entry["size"] > settings.max_download_bytes:
             raise HTTPException(
                 413,
@@ -386,18 +378,28 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             chunks(), status_code=status, media_type="application/octet-stream", headers=headers,
         )
 
-    def artifact_target(run_uuid: UUID, execution_id: str, path: str) -> str:
-        query = urlencode({"execution_id": execution_id, "path": path})
-        return f"/api/v1/runs/{run_uuid}/artifact?{query}"
+    def artifact_target(run_uuid: UUID, execution_id: str, path: str,
+                        *, attempt=None, calcjob_uuid=None) -> str:
+        values = {"execution_id": execution_id, "path": path}
+        if attempt is not None:
+            values["attempt"] = attempt
+        if calcjob_uuid is not None:
+            values["calcjob_uuid"] = str(calcjob_uuid)
+        return f"/api/v1/runs/{run_uuid}/artifact?{urlencode(values)}"
 
     @app.post("/api/v1/runs/{run_uuid}/artifact/authorize", dependencies=protected)
     def authorize_artifact(
         request: Request, run_uuid: UUID,
         execution_id: str = Query(min_length=1, max_length=128),
         path: str = Query(min_length=1, max_length=1024),
+        attempt: int | None = Query(default=None, ge=1),
+        calcjob_uuid: UUID | None = Query(default=None),
     ) -> JSONResponse:
-        artifact_entry(request, run_uuid, execution_id, path)
-        return grant_download(request, artifact_target(run_uuid, execution_id, path))
+        entry = artifact_entry(request, run_uuid, execution_id, path,
+                               attempt=attempt, calcjob_uuid=calcjob_uuid)
+        target = artifact_target(run_uuid, execution_id, path,
+                                 attempt=entry["attempt"], calcjob_uuid=entry["calcjob_uuid"])
+        return grant_download(request, target)
 
     @app.get("/api/v1/runs/{run_uuid}/artifact")
     @app.head("/api/v1/runs/{run_uuid}/artifact", include_in_schema=False)
@@ -406,12 +408,18 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
         execution_id: str = Query(min_length=1, max_length=128),
         path: str = Query(min_length=1, max_length=1024),
+        attempt: int | None = Query(default=None, ge=1),
+        calcjob_uuid: UUID | None = Query(default=None),
     ) -> Response:
-        download_auth(request, artifact_target(run_uuid, execution_id, path), credentials)
-        entry = artifact_entry(request, run_uuid, execution_id, path)
+        target = artifact_target(run_uuid, execution_id, path,
+                                 attempt=attempt, calcjob_uuid=calcjob_uuid)
+        download_auth(request, target, credentials)
+        entry = artifact_entry(request, run_uuid, execution_id, path,
+                               attempt=attempt, calcjob_uuid=calcjob_uuid)
         return stream_file(
             request, lambda: request.app.state.service.open_artifact(
-                str(run_uuid), execution_id, path
+                str(run_uuid), execution_id, path,
+                attempt=entry["attempt"], calcjob_uuid=entry["calcjob_uuid"],
             ), entry["size"], PurePosixPath(path).name,
         )
 

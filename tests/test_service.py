@@ -38,8 +38,15 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
             record("seek")
             return super().seek(offset, whence)
 
+    def metadata(*args, **kwargs):
+        assert args == ("run", "execution", "result")
+        assert kwargs == {"attempt": 2, "calcjob_uuid": "exact-child"}
+        record("metadata")
+        return {"size": 4}
+
     @contextmanager
-    def open_artifact(*args):
+    def open_artifact(*args, **kwargs):
+        assert kwargs == {"attempt": 2, "calcjob_uuid": "exact-child"}
         record("open")
         try:
             yield Stream(b"data")
@@ -47,7 +54,10 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
             record("close")
 
     plugin = SimpleNamespace(
-        list_runs=list_runs, open_artifact=open_artifact, get_export_plan=get_export_plan
+        list_runs=list_runs,
+        open_artifact=open_artifact,
+        get_export_plan=get_export_plan,
+        get_artifact_metadata=metadata,
     )
     monkeypatch.setattr(aiida, "load_profile", load_profile)
     monkeypatch.setattr("qcl_negf_api.service.import_module", lambda name: plugin)
@@ -63,7 +73,12 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
             futures = [clients.submit(actor.list_runs, limit=10) for _ in range(8)]
             assert all(future.result() == [] for future in futures)
         assert actor.get_export_plan("run", "execution")["plan"] == b"frozen bytes"
-        with actor.open_artifact("run", "execution", "result") as stream:
+        assert actor.get_artifact_metadata(
+            "run", "execution", "result", attempt=2, calcjob_uuid="exact-child"
+        ) == {"size": 4}
+        with actor.open_artifact(
+            "run", "execution", "result", attempt=2, calcjob_uuid="exact-child"
+        ) as stream:
             stream.seek(1)
             assert stream.read(2) == b"at"
             stream.seek(0)
@@ -75,6 +90,7 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         "load",
         *(["list"] * 8),
         "plan",
+        "metadata",
         "open",
         "seek",
         "read",

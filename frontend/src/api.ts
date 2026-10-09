@@ -30,6 +30,8 @@ export interface Config {
 }
 export interface Artifact {
   execution_id: string;
+  attempt: number;
+  calcjob_uuid: string;
   path: string;
   size: number;
 }
@@ -108,6 +110,8 @@ export async function download(
   const query = new URLSearchParams({
     execution_id: artifact.execution_id,
     path: artifact.path,
+    attempt: String(artifact.attempt),
+    calcjob_uuid: artifact.calcjob_uuid,
   });
   await nativeDownload(token, `/runs/${uuid}/artifact/authorize?${query}`);
 }

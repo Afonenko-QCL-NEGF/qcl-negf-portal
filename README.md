@@ -96,6 +96,20 @@ All `/api/v1/` operations require `Authorization: Bearer TOKEN`, except GET/HEAD
 | POST | `/api/v1/exports/{export_id}/authorize` | Set a scoped download cookie and return its credential-free URL |
 | GET/HEAD | `/api/v1/exports/{export_id}/download` | Stream the archive, with Range and If-Range support |
 
+Artifact authorize and GET/HEAD accept optional positive `attempt` and full
+`calcjob_uuid` query selectors. Both selectors constrain the same retrieved child.
+Bearer requests and authorize retain the selected-attempt shortcut, including
+legacy single-attempt workflows. Authorize resolves it once and returns an exact
+URL containing both selectors. The native browser download must follow that
+returned URL: changing or removing either selector invalidates its scoped cookie
+(401 before artifact metadata or payload access). Reusing the old selector-less
+URL with a new cookie is therefore refused. Exact metadata, download limits,
+HEAD and Range headers, and streamed bytes all refer to the same child even if
+published selection changes. HEAD reads cached metadata without opening payload.
+Missing exact children/inventory/path return 404; ambiguous selection, incomplete
+inventory and malformed selectors/path return 422. New Portal requires the
+coordinated AiiDA `get_artifact_metadata` service operation.
+
 The `plan` field is a string containing the original frozen JSON file, not a parsed nested object. This preserves the exact numerical representation and fingerprint across the browser, API and AiiDA repository.
 
 Submission returns HTTP 202 once AiiDA accepts the workflow. Invalid plans and resource requests return 422; an unapproved Code returns 403; broker unavailability returns 503. Submission is not automatically retried: submitting the same plan again creates a new provenance record. A cancellation request is asynchronous; refresh the workflow to see its eventual state.

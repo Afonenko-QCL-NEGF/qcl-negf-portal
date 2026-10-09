@@ -556,11 +556,11 @@ function App() {
                     {artifacts.length ? (
                       <ul className="files">
                         {artifacts.map((file) => (
-                          <li key={`${file.execution_id}/${file.path}`}>
+                          <li key={`${file.execution_id}/${file.attempt}/${file.calcjob_uuid}/${file.path}`}>
                             <div>
                               <code>{file.path}</code>
                               <span className="muted">
-                                {file.execution_id} · {readableBytes(file.size)}
+                                {file.execution_id} · attempt {file.attempt} · {readableBytes(file.size)}
                               </span>
                             </div>
                             {config &&

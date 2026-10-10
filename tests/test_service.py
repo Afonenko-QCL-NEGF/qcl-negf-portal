@@ -53,7 +53,29 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         finally:
             record("close")
 
+    def save_agent_report(run, raw):
+        assert (run, raw) == ("run", b"exact agent report")
+        record("agent_save")
+        return {"uuid": "report", "filename": "agent-report.json", "bytes": len(raw)}
+
+    def list_agent_reports(run, *, limit, offset):
+        assert (run, limit, offset) == ("run", 7, 3)
+        record("agent_list")
+        return [{"uuid": "report"}]
+
+    def read_agent_report(run, report):
+        assert (run, report) == ("run", "report")
+        record("agent_repository_open")
+        try:
+            with Stream(b"exact agent report") as handle:
+                return handle.read(262145)
+        finally:
+            record("agent_repository_close")
+
     plugin = SimpleNamespace(
+        save_agent_report=save_agent_report,
+        list_agent_reports=list_agent_reports,
+        read_agent_report=read_agent_report,
         list_runs=list_runs,
         open_artifact=open_artifact,
         get_export_plan=get_export_plan,
@@ -76,6 +98,11 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         assert actor.get_artifact_metadata(
             "run", "execution", "result", attempt=2, calcjob_uuid="exact-child"
         ) == {"size": 4}
+        assert actor.save_agent_report("run", b"exact agent report") == {
+            "uuid": "report", "filename": "agent-report.json", "bytes": 18,
+        }
+        assert actor.list_agent_reports("run", limit=7, offset=3) == [{"uuid": "report"}]
+        assert actor.read_agent_report("run", "report") == b"exact agent report"
         with actor.open_artifact(
             "run", "execution", "result", attempt=2, calcjob_uuid="exact-child"
         ) as stream:
@@ -91,6 +118,11 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         *(["list"] * 8),
         "plan",
         "metadata",
+        "agent_save",
+        "agent_list",
+        "agent_repository_open",
+        "read",
+        "agent_repository_close",
         "open",
         "seek",
         "read",

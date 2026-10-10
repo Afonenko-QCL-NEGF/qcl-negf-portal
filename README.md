@@ -87,6 +87,9 @@ All `/api/v1/` operations require `Authorization: Bearer TOKEN`, except GET/HEAD
 | POST | `/api/v1/runs` | Submit `{plan, code_uuid, resources, label}` |
 | GET | `/api/v1/runs/{uuid}` | State, scientific results and child calculations |
 | GET | `/api/v1/runs/{uuid}/report` | Process report entries |
+| POST | `/api/v1/runs/{uuid}/agent-reports` | Store `{report: "exact UTF-8 JSON text"}`; return 201 stored file receipt |
+| GET | `/api/v1/runs/{uuid}/agent-reports?limit=20&offset=0` | Paginated stored agent report receipts |
+| GET | `/api/v1/runs/{uuid}/agent-reports/{report_uuid}` | Exact `agent-report.json` attachment |
 | POST | `/api/v1/runs/{uuid}/kill` | Request cancellation |
 | GET | `/api/v1/runs/{uuid}/artifacts` | Retrieved file inventory |
 | POST | `/api/v1/runs/{uuid}/artifact/authorize?execution_id=…&path=…` | Authorize a native browser download of one inventoried file |
@@ -109,6 +112,10 @@ published selection changes. HEAD reads cached metadata without opening payload.
 Missing exact children/inventory/path return 404; ambiguous selection, incomplete
 inventory and malformed selectors/path return 422. New Portal requires the
 coordinated AiiDA `get_artifact_metadata` service operation.
+
+Agent reports are separate immutable UTF-8 JSON files, with a 262144-byte raw limit. POST accepts only the strict `report` string envelope, preserves the validated bytes, and returns 201 only after AiiDA stores the file. Repeated POST can create another UUID; submission is not retried automatically. Collections contain receipts and use limits 1–100 with nonnegative offsets. File reads return the original JSON bytes with a fixed attachment filename and Content-Length. These three operations require the bearer token and use no-store responses; missing/wrong-anchor files return 404, invalid/conflicting/corrupt reports 422, and backend unavailability 503. They do not change workflow outputs, process reports or scientific assessments.
+
+The browser displays **Agent reports for this run**, with author question text, exact run/definition/variant/attempt/CalcJob references, and conclusion, reasoning and limitations as escaped text. Empty used-run references are shown explicitly. Author prose does not change machine scientific statuses. This partial run view has no stable research card or canonical question relation; those require the R01 card/catalog interface. The author question snapshot is not proof of a canonical research question. Existing bearer credentials remain in memory only, and the complete interface retains its light theme.
 
 The `plan` field is a string containing the original frozen JSON file, not a parsed nested object. This preserves the exact numerical representation and fingerprint across the browser, API and AiiDA repository.
 

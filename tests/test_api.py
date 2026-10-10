@@ -41,11 +41,19 @@ def service():
         return {**record, "results": {"point_1": {"status": "not_converged"}}}
 
     @contextmanager
-    def open_artifact(uuid, execution_id, path):
+    def open_artifact(uuid, execution_id, path, *, attempt=None, calcjob_uuid=None):
+        assert (attempt, calcjob_uuid) == (1, CODE)
         assert (uuid, execution_id, path) == (RUN, "point_1", "result.json")
         yield BytesIO(b'{"status":"not_converged"}')
 
+    def metadata(uuid, execution_id, path, *, attempt=None, calcjob_uuid=None):
+        if (uuid, execution_id, path) != (RUN, "point_1", "result.json"):
+            raise LookupError(path)
+        return {"execution_id": execution_id, "path": path, "size": 26,
+                "attempt": 1, "calcjob_uuid": CODE}
+
     return SimpleNamespace(
+        get_artifact_metadata=metadata,
         calls=calls,
         list_runs=lambda **kwargs: [record],
         submit_plan=submit,
@@ -58,7 +66,7 @@ def service():
         ],
         kill_run=lambda uuid: {**record, "uuid": uuid},
         list_artifacts=lambda uuid: [
-            {"execution_id": "point_1", "path": "result.json", "size": 26}
+            {"execution_id": "point_1", "path": "result.json", "size": 26, "attempt": 1, "calcjob_uuid": CODE}
         ],
         open_artifact=open_artifact,
     )
@@ -183,7 +191,8 @@ def test_native_artifact_capability_cannot_open_other_artifacts(client):
     response = client.post(f"{base}/authorize", params=params, headers=AUTH)
     assert response.status_code == 200
     assert TOKEN not in response.text and TOKEN not in response.headers["set-cookie"]
-    assert client.get(base, params=params).status_code == 200
+    assert client.get(response.json()["url"]).status_code == 200
+    assert client.get(base, params=params).status_code == 401
     assert client.get(base, params={**params, "path": "missing"}).status_code == 401
     assert client.get("/api/v1/runs").status_code == 401
 
@@ -348,3 +357,404 @@ def test_worker_scratch_path_is_a_trusted_site_setting(service):
 def test_scratch_paths_must_be_normalized_and_absolute(path):
     with pytest.raises(ValueError, match="Scratch root"):
         Settings(TOKEN, (CODE,), scratch_root=path)
+
+
+@pytest.fixture
+def locator_source(monkeypatch):
+    from aiida_qcl_negf import service as plugin
+
+    class Outputs(dict):
+        def __getattr__(self, key):
+            try:
+                return self[key]
+            except KeyError as exc:
+                raise AttributeError(key) from exc
+
+    c2 = "20dd2a4c-031b-425c-90b8-2f7ea564d313"
+    calls = []
+    children = []
+    for attempt, uuid, payload in [(1, CODE, b"A" * 100), (2, c2, b"B" * 200)]:
+
+        class Repository:
+            def __init__(self, uuid, payload):
+                self.uuid, self.payload = uuid, payload
+
+            @contextmanager
+            def open(self, path, mode):
+                calls.append(("open", self.uuid))
+
+                class Stream(BytesIO):
+                    def read(self, count=-1):
+                        assert 0 <= count <= 65536
+                        return super().read(count)
+
+                with Stream(self.payload) as stream:
+                    yield stream
+
+        inventory = {"complete": True, "files": [{"path": "result.bin", "size": len(payload)}]}
+        children.append(
+            SimpleNamespace(
+                uuid=uuid,
+                inputs=SimpleNamespace(
+                    execution_id=SimpleNamespace(value="E"), attempt=SimpleNamespace(value=attempt)
+                ),
+                outputs=Outputs(
+                    retrieved=SimpleNamespace(
+                        base=SimpleNamespace(repository=Repository(uuid, payload))
+                    ),
+                    inventory=SimpleNamespace(get_dict=lambda inventory=inventory: inventory),
+                ),
+            )
+        )
+    selection = {"execution_id": "E", "attempt": 2, "calcjob_uuid": c2}
+    node = SimpleNamespace(
+        outputs=Outputs(selections={"E": SimpleNamespace(get_dict=lambda: selection)})
+    )
+    monkeypatch.setattr(plugin, "_node", lambda _: node)
+    monkeypatch.setattr(plugin, "_children", lambda _: children)
+    native_metadata = plugin.get_artifact_metadata
+
+    def metadata(*args, **kwargs):
+        calls.append(("metadata", kwargs))
+        return native_metadata(*args, **kwargs)
+
+    facade = SimpleNamespace(
+        get_artifact_metadata=metadata,
+        open_artifact=plugin.open_artifact,
+        list_artifacts=plugin.list_artifacts,
+    )
+    return facade, children, node, selection, calls, c2
+
+
+def test_locator_selection_race_capability_and_range(locator_source):
+    facade, children, node, selection, calls, c2 = locator_source
+    base = f"/api/v1/runs/{RUN}/artifact"
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), facade)) as client:
+        rows = client.get(f"/api/v1/runs/{RUN}/artifacts", headers=AUTH).json()["artifacts"]
+        assert [(r["attempt"], r["calcjob_uuid"], r["size"]) for r in rows] == [
+            (1, CODE, 100),
+            (2, c2, 200),
+        ]
+        response = client.post(
+            base + "/authorize", params={"execution_id": "E", "path": "result.bin"}, headers=AUTH
+        )
+        assert response.status_code == 200
+        url = response.json()["url"]
+        assert url == base + f"?execution_id=E&path=result.bin&attempt=2&calcjob_uuid={c2}"
+        assert not any(c[0] == "open" for c in calls)
+        selection.update(attempt=1, calcjob_uuid=CODE)
+        calls.clear()
+        for query in [
+            f"attempt=1&calcjob_uuid={CODE}",
+            f"attempt=2&calcjob_uuid={CODE}",
+            "attempt=2",
+            f"calcjob_uuid={c2}",
+            "",
+        ]:
+            altered = base + "?execution_id=E&path=result.bin" + ("&" + query if query else "")
+            assert client.get(altered).status_code == 401
+            assert calls == []
+        head = client.head(url)
+        assert head.status_code == 200 and head.content == b""
+        assert head.headers["content-length"] == "200"
+        assert not any(c[0] == "open" for c in calls)
+        assert client.get(url).content == b"B" * 200
+        response = client.get(url, headers={"Range": "bytes=150-159"})
+        assert response.status_code == 206 and response.content == b"B" * 10
+        assert response.headers["content-range"] == "bytes 150-159/200"
+        response = client.get(url, headers={"Range": "bytes=200-"})
+        assert response.status_code == 416 and response.headers["content-range"] == "bytes */200"
+        assert (
+            client.get(url, headers={"Range": "bytes=150-159", "If-Range": '"old"'}).content
+            == b"B" * 200
+        )
+        params = {"execution_id": "E", "path": "result.bin", "attempt": 1, "calcjob_uuid": CODE}
+        response = client.get(base, params=params, headers={**AUTH, "Range": "bytes=90-99"})
+        assert response.status_code == 206 and response.content == b"A" * 10
+        assert response.headers["content-range"] == "bytes 90-99/100"
+        assert client.head(base, params=params, headers=AUTH).headers["content-length"] == "100"
+        for requested in ["bytes=100-", "bytes=0-1,4-5"]:
+            assert (
+                client.get(base, params=params, headers={**AUTH, "Range": requested}).headers[
+                    "content-range"
+                ]
+                == "bytes */100"
+            )
+        assert (
+            client.get(base, params={**params, "calcjob_uuid": c2}, headers=AUTH).status_code == 404
+        )
+
+
+def test_bearer_shortcut_pins_open_after_metadata_and_exact_limit(locator_source):
+    facade, children, node, selection, calls, c2 = locator_source
+    native = facade.get_artifact_metadata
+
+    def raced(*args, **kwargs):
+        row = native(*args, **kwargs)
+        selection.update(attempt=1, calcjob_uuid=CODE)
+        return row
+
+    facade.get_artifact_metadata = raced
+    base = f"/api/v1/runs/{RUN}/artifact"
+    params = {"execution_id": "E", "path": "result.bin"}
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), facade)) as client:
+        assert client.get(base, params=params, headers=AUTH).content == b"B" * 200
+        assert ("open", c2) in calls
+    with TestClient(create_app(Settings(TOKEN, (CODE,), max_download_bytes=150), facade)) as client:
+        calls.clear()
+        assert client.get(base, params={**params, "attempt": 2}, headers=AUTH).status_code == 413
+        assert not any(c[0] == "open" for c in calls)
+        assert (
+            client.get(base, params={**params, "calcjob_uuid": CODE}, headers=AUTH).content
+            == b"A" * 100
+        )
+
+
+@pytest.mark.parametrize(
+    "fault,status",
+    [
+        ("attempt0", 422),
+        ("attemptnegative", 422),
+        ("uuid", 422),
+        ("path", 422),
+        ("foreign", 404),
+        ("inventory", 404),
+        ("retrieved", 404),
+        ("absent", 404),
+        ("incomplete", 422),
+        ("ambiguous", 422),
+        ("conflict", 422),
+    ],
+)
+def test_exact_locator_errors_have_no_payload(locator_source, fault, status):
+    facade, children, node, selection, calls, c2 = locator_source
+    params = {"execution_id": "E", "path": "result.bin"}
+    if fault == "attempt0":
+        params["attempt"] = 0
+    elif fault == "attemptnegative":
+        params["attempt"] = -1
+    elif fault == "uuid":
+        params["calcjob_uuid"] = "bad"
+    elif fault == "path":
+        params["path"] = "../x"
+    elif fault == "foreign":
+        params["calcjob_uuid"] = RUN
+    elif fault in ("inventory", "retrieved"):
+        del children[1].outputs[fault]
+    elif fault == "absent":
+        params["path"] = "missing"
+    elif fault == "incomplete":
+        children[1].outputs.inventory.get_dict()["complete"] = False
+    elif fault == "ambiguous":
+        node.outputs.clear()
+    elif fault == "conflict":
+        node.outputs.selections["other"] = SimpleNamespace(get_dict=lambda: selection)
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), facade)) as client:
+        base = f"/api/v1/runs/{RUN}/artifact"
+        for method, url in [
+            (client.get, base),
+            (client.head, base),
+            (client.post, base + "/authorize"),
+        ]:
+            assert method(url, params=params, headers=AUTH).status_code == status
+        assert not any(c[0] == "open" for c in calls)
+
+
+REPORT_UUID = "758d02d5-37d6-487b-a95e-39c59d68ae3e"
+
+
+def agent_report_raw():
+    # Independent run-view fixture: this author question is not an R01 card.
+    return json.dumps({
+        "schema": "qcl-negf-agent-report-v1",
+        "anchor": {"run_uuid": RUN, "root_definition_id": "study_alpha",
+                   "root_kind": "study", "plan_fingerprint": "a" * 64},
+        "question_snapshot": "Что измерено?",
+        "used_runs": [],
+        "conclusion": "Author says accepted; machine status remains not_converged.",
+        "reasoning": "No new numerical measurement.",
+        "limitations": "Run-view only; no stable card or canonical question proof.",
+    }, ensure_ascii=False, indent=2) + "\n"
+
+
+@pytest.fixture
+def agent_service(service):
+    import hashlib
+
+    service.report_calls = []
+    service.saved_reports = []
+    service.agent_error = None
+    service.agent_raw = agent_report_raw().encode("utf-8")
+    receipt = {
+        "uuid": REPORT_UUID, "filename": "agent-report.json",
+        "bytes": len(service.agent_raw), "sha256": hashlib.sha256(service.agent_raw).hexdigest(),
+        "ctime": "2026-01-02T00:00:00Z",
+        "anchor": json.loads(service.agent_raw)["anchor"],
+    }
+    service.agent_receipt = receipt
+
+    def gate(name, run):
+        service.report_calls.append(name)
+        if service.agent_error is not None:
+            raise service.agent_error
+        if run != RUN:
+            raise LookupError("Unknown anchor")
+
+    def save_agent_report(run, raw):
+        gate("save", run)
+        encoded = raw.encode("utf-8") if isinstance(raw, str) else raw
+        service.saved_reports.append(encoded)
+        return {**receipt, "bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
+
+    def list_agent_reports(run, *, limit=20, offset=0):
+        gate("list", run)
+        service.report_calls.append((limit, offset))
+        return [receipt]
+
+    def read_agent_report(run, report):
+        gate("read", run)
+        if report != REPORT_UUID:
+            raise LookupError("Unknown report")
+        return service.agent_raw
+
+    service.save_agent_report = save_agent_report
+    service.list_agent_reports = list_agent_reports
+    service.read_agent_report = read_agent_report
+    return service
+
+
+@pytest.fixture
+def agent_client(agent_service):
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), agent_service)) as value:
+        yield value
+
+
+@pytest.mark.parametrize("method,suffix,payload", [
+    ("post", "", {"report": "{}"}),
+    ("get", "", None),
+    ("get", "/" + REPORT_UUID, None),
+])
+def test_agent_reports_authentication_precedes_actor(agent_client, agent_service, method, suffix, payload):
+    kwargs = {"json": payload} if payload is not None else {}
+    url = f"/api/v1/runs/{RUN}/agent-reports{suffix}"
+    for headers in ({}, {"Authorization": "Bearer wrong"}):
+        assert getattr(agent_client, method)(url, headers=headers, **kwargs).status_code == 401
+    assert agent_service.report_calls == []
+    assert agent_service.saved_reports == []
+
+
+def test_agent_report_created_only_after_storage_preserves_raw_and_machine_status(agent_client, agent_service):
+    before = agent_client.get(f"/api/v1/runs/{RUN}", headers=AUTH).json()
+    old_log = agent_client.get(f"/api/v1/runs/{RUN}/report", headers=AUTH).json()
+    raw = agent_report_raw()
+    response = agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json={"report": raw})
+    assert response.status_code == 201, response.text
+    assert agent_service.saved_reports == [raw.encode("utf-8")]
+    assert response.json() == agent_service.agent_receipt
+    assert response.headers["cache-control"] == "no-store"
+    assert agent_client.get(f"/api/v1/runs/{RUN}", headers=AUTH).json() == before
+    assert before["results"]["point_1"]["status"] == "not_converged"
+    assert agent_client.get(f"/api/v1/runs/{RUN}/report", headers=AUTH).json() == old_log
+    assert "entries" in old_log and "reports" not in old_log
+
+
+def test_agent_reports_collection_pagination_is_receipts_only(agent_client, agent_service):
+    response = agent_client.get(f"/api/v1/runs/{RUN}/agent-reports?limit=7&offset=3", headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"reports": [agent_service.agent_receipt]}
+    assert agent_service.report_calls == ["list", (7, 3)]
+    assert response.headers["cache-control"] == "no-store"
+    for query in ("limit=0", "limit=101", "offset=-1", "offset=bad"):
+        agent_service.report_calls.clear()
+        assert agent_client.get(f"/api/v1/runs/{RUN}/agent-reports?{query}", headers=AUTH).status_code == 422
+        assert agent_service.report_calls == []
+
+
+def test_agent_report_download_exact_raw_attachment_without_cache(agent_client, agent_service):
+    response = agent_client.get(f"/api/v1/runs/{RUN}/agent-reports/{REPORT_UUID}", headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.content == agent_service.agent_raw
+    assert response.headers["content-type"].split(";")[0] == "application/json"
+    assert response.headers["content-disposition"] == 'attachment; filename="agent-report.json"'
+    assert response.headers["content-length"] == str(len(agent_service.agent_raw))
+    assert response.headers["cache-control"] == "no-store"
+    assert agent_service.report_calls == ["read"]
+    assert agent_service.saved_reports == []
+
+
+@pytest.mark.parametrize("payload", [{}, {"report": {}}, {"report": 7}, {"report": None},
+                                      {"report": "{}", "status": "pass"}])
+def test_agent_report_post_strict_envelope_rejected_before_actor(agent_client, agent_service, payload):
+    assert agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json=payload).status_code == 422
+    assert agent_service.report_calls == []
+    assert agent_service.saved_reports == []
+
+
+def test_agent_report_utf8_byte_cap_exact_and_plus_one_before_actor(agent_client, agent_service):
+    report = json.loads(agent_report_raw())
+    report["conclusion"] = "μ"
+    base = json.dumps(report, ensure_ascii=False)
+    raw = base[:-1] + " " * (262144 - len(base.encode("utf-8"))) + "}"
+    assert len(raw.encode("utf-8")) == 262144 and len(raw) < 262144
+    response = agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json={"report": raw})
+    assert response.status_code == 201, response.text
+    assert agent_service.saved_reports == [raw.encode("utf-8")]
+    agent_service.report_calls.clear()
+    assert agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json={"report": raw + " "}).status_code == 422
+    assert agent_service.report_calls == []
+    assert len(agent_service.saved_reports) == 1
+    assert agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers={**AUTH, "Content-Type": "application/json"}, content=b'{"report":"\\ud800"}').status_code == 422
+    assert agent_service.report_calls == []
+
+
+@pytest.mark.parametrize("error,status", [(LookupError("Missing or wrong anchor"), 404),
+                                         (ValueError("Corrupt report binding"), 422),
+                                         (RuntimeError("Backend unavailable"), 503)])
+@pytest.mark.parametrize("method,suffix", [("post", ""), ("get", ""), ("get", "/" + REPORT_UUID)])
+def test_agent_report_backend_errors_never_publish_success(agent_client, agent_service, error, status, method, suffix):
+    agent_service.agent_error = error
+    kwargs = {"json": {"report": agent_report_raw()}} if method == "post" else {}
+    response = getattr(agent_client, method)(f"/api/v1/runs/{RUN}/agent-reports{suffix}", headers=AUTH, **kwargs)
+    assert response.status_code == status, response.text
+    operation = "save" if method == "post" else "read" if suffix else "list"
+    assert agent_service.report_calls == [operation]
+    assert agent_service.saved_reports == []
+
+
+def test_agent_report_uuid_validation_and_missing_exact_file(agent_client, agent_service):
+    assert agent_client.get(f"/api/v1/runs/not-a-uuid/agent-reports", headers=AUTH).status_code == 422
+    assert agent_client.get(f"/api/v1/runs/{RUN}/agent-reports/not-a-uuid", headers=AUTH).status_code == 422
+    assert agent_service.report_calls == []
+    assert agent_client.get(f"/api/v1/runs/{CODE}/agent-reports", headers=AUTH).status_code == 404
+    assert agent_client.get(f"/api/v1/runs/{RUN}/agent-reports/{CODE}", headers=AUTH).status_code == 404
+
+
+
+def test_agent_report_deep_outer_json_is_safe_422_before_actor(agent_client, agent_service):
+    # Wire bytes bypass the client's encoder recursion limit; the body is small.
+    body = b'{"report":"{}","extra":' + b"[" * 20000 + b"0" + b"]" * 20000 + b"}"
+    assert len(body) < 2_000_000
+    response = agent_client.post(
+        f"/api/v1/runs/{RUN}/agent-reports",
+        headers={**AUTH, "Content-Type": "application/json"}, content=body,
+    )
+    assert response.status_code == 422, response.text
+    assert isinstance(response.json()["detail"], str)
+    response.json()["detail"].encode("utf-8", "strict")
+    assert agent_service.report_calls == []
+    assert agent_service.saved_reports == []
+
+
+def test_agent_report_backend_surrogate_detail_is_safe_422(agent_client, agent_service):
+    # ASCII JSON bytes decode escaped keys to a lone surrogate in ContractError.
+    raw = r'{"\ud800":1,"\ud800":2}'
+    assert raw.encode("utf-8", "strict") == b'{"\\ud800":1,"\\ud800":2}'
+    agent_service.agent_error = ValueError("Duplicate JSON key: " + chr(0xD800))
+    response = agent_client.post(
+        f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json={"report": raw},
+    )
+    assert response.status_code == 422, response.text
+    assert isinstance(response.json()["detail"], str)
+    response.json()["detail"].encode("utf-8", "strict")
+    assert agent_service.report_calls == ["save"]
+    assert agent_service.saved_reports == []

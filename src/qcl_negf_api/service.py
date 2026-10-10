@@ -15,8 +15,12 @@ OPERATIONS = frozenset(
         "get_export_plan",
         "submit_plan",
         "get_run_report",
+        "save_agent_report",
+        "list_agent_reports",
+        "read_agent_report",
         "kill_run",
         "list_artifacts",
+        "get_artifact_metadata",
     }
 )
 
@@ -72,9 +76,11 @@ class AiidaService:
         return self._executor.submit(getattr(self._service, name), *args, **kwargs).result()
 
     @contextmanager
-    def open_artifact(self, identifier: str, execution_id: str, path: str):
+    def open_artifact(self, identifier: str, execution_id: str, path: str, *, attempt=None, calcjob_uuid=None):
         def enter():
-            context = self._service.open_artifact(identifier, execution_id, path)
+            context = self._service.open_artifact(
+                identifier, execution_id, path, attempt=attempt, calcjob_uuid=calcjob_uuid
+            )
             return context, context.__enter__()
 
         context, handle = self._executor.submit(enter).result()

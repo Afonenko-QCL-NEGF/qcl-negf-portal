@@ -38,16 +38,48 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
             record("seek")
             return super().seek(offset, whence)
 
+    def metadata(*args, **kwargs):
+        assert args == ("run", "execution", "result")
+        assert kwargs == {"attempt": 2, "calcjob_uuid": "exact-child"}
+        record("metadata")
+        return {"size": 4}
+
     @contextmanager
-    def open_artifact(*args):
+    def open_artifact(*args, **kwargs):
+        assert kwargs == {"attempt": 2, "calcjob_uuid": "exact-child"}
         record("open")
         try:
             yield Stream(b"data")
         finally:
             record("close")
 
+    def save_agent_report(run, raw):
+        assert (run, raw) == ("run", b"exact agent report")
+        record("agent_save")
+        return {"uuid": "report", "filename": "agent-report.json", "bytes": len(raw)}
+
+    def list_agent_reports(run, *, limit, offset):
+        assert (run, limit, offset) == ("run", 7, 3)
+        record("agent_list")
+        return [{"uuid": "report"}]
+
+    def read_agent_report(run, report):
+        assert (run, report) == ("run", "report")
+        record("agent_repository_open")
+        try:
+            with Stream(b"exact agent report") as handle:
+                return handle.read(262145)
+        finally:
+            record("agent_repository_close")
+
     plugin = SimpleNamespace(
-        list_runs=list_runs, open_artifact=open_artifact, get_export_plan=get_export_plan
+        save_agent_report=save_agent_report,
+        list_agent_reports=list_agent_reports,
+        read_agent_report=read_agent_report,
+        list_runs=list_runs,
+        open_artifact=open_artifact,
+        get_export_plan=get_export_plan,
+        get_artifact_metadata=metadata,
     )
     monkeypatch.setattr(aiida, "load_profile", load_profile)
     monkeypatch.setattr("qcl_negf_api.service.import_module", lambda name: plugin)
@@ -63,7 +95,17 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
             futures = [clients.submit(actor.list_runs, limit=10) for _ in range(8)]
             assert all(future.result() == [] for future in futures)
         assert actor.get_export_plan("run", "execution")["plan"] == b"frozen bytes"
-        with actor.open_artifact("run", "execution", "result") as stream:
+        assert actor.get_artifact_metadata(
+            "run", "execution", "result", attempt=2, calcjob_uuid="exact-child"
+        ) == {"size": 4}
+        assert actor.save_agent_report("run", b"exact agent report") == {
+            "uuid": "report", "filename": "agent-report.json", "bytes": 18,
+        }
+        assert actor.list_agent_reports("run", limit=7, offset=3) == [{"uuid": "report"}]
+        assert actor.read_agent_report("run", "report") == b"exact agent report"
+        with actor.open_artifact(
+            "run", "execution", "result", attempt=2, calcjob_uuid="exact-child"
+        ) as stream:
             stream.seek(1)
             assert stream.read(2) == b"at"
             stream.seek(0)
@@ -75,6 +117,12 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         "load",
         *(["list"] * 8),
         "plan",
+        "metadata",
+        "agent_save",
+        "agent_list",
+        "agent_repository_open",
+        "read",
+        "agent_repository_close",
         "open",
         "seek",
         "read",

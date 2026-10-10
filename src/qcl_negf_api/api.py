@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -95,6 +95,11 @@ class Submission(BaseModel):
     code_uuid: UUID = Field(strict=False)
     label: str = Field(default="", max_length=120)
     resources: Resources = Field(default_factory=Resources)
+
+
+class AgentReportSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    report: StrictStr
 
 
 class ExportRequest(BaseModel):
@@ -248,6 +253,16 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             LOG.exception("AiiDA service unavailable")
             raise HTTPException(503, "AiiDA service is unavailable") from exc
 
+    def invoke_agent_report(request: Request, method: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return invoke(request, method, *args, **kwargs)
+        except HTTPException as exc:
+            if exc.status_code == 422:
+                # Backend validation can include a decoded lone-surrogate key.
+                # Keep report refusals safe without changing existing API errors.
+                raise HTTPException(422, "Agent report validation was refused") from exc
+            raise
+
     @app.get("/healthz")
     def health() -> dict:
         return {"status": "ok", "version": __version__}
@@ -320,6 +335,47 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     @app.get("/api/v1/runs/{run_uuid}/report", dependencies=protected)
     def report(request: Request, run_uuid: UUID) -> dict:
         return {"entries": invoke(request, "get_run_report", str(run_uuid))}
+
+    @app.post(
+        "/api/v1/runs/{run_uuid}/agent-reports", dependencies=protected, status_code=201,
+        openapi_extra={"requestBody": {"required": True, "content": {
+            "application/json": {"schema": AgentReportSubmission.model_json_schema()},
+        }}},
+    )
+    async def save_agent_report(request: Request, run_uuid: UUID) -> dict:
+        # Validate the UTF-8 string before Pydantic can echo invalid Unicode in
+        # an error response. Only this endpoint uses this safe constant refusal.
+        try:
+            payload = await request.json()
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            raise HTTPException(422, "Agent report requires a valid JSON envelope") from exc
+        try:
+            if isinstance(payload, dict) and isinstance(payload.get("report"), str):
+                payload["report"].encode("utf-8", "strict")
+            submission = AgentReportSubmission.model_validate(payload)
+            raw = submission.report.encode("utf-8", "strict")
+        except (ValidationError, UnicodeError) as exc:
+            raise HTTPException(422, "Agent report requires only a UTF-8 report string") from exc
+        if len(raw) > 262144:
+            raise HTTPException(422, "Agent report exceeds the 262144-byte limit")
+        return await run_in_threadpool(invoke_agent_report, request, "save_agent_report", str(run_uuid), raw)
+
+    @app.get("/api/v1/runs/{run_uuid}/agent-reports", dependencies=protected)
+    def agent_reports(
+        request: Request, run_uuid: UUID,
+        limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0),
+    ) -> dict:
+        return {"reports": invoke_agent_report(request, "list_agent_reports", str(run_uuid), limit=limit, offset=offset)}
+
+    @app.get("/api/v1/runs/{run_uuid}/agent-reports/{report_uuid}", dependencies=protected)
+    def agent_report_file(request: Request, run_uuid: UUID, report_uuid: UUID) -> Response:
+        raw = invoke_agent_report(request, "read_agent_report", str(run_uuid), str(report_uuid))
+        if not isinstance(raw, bytes) or len(raw) > 262144:
+            raise HTTPException(422, "Agent report payload is unavailable within its byte limit")
+        return Response(raw, media_type="application/json", headers={
+            "Content-Disposition": 'attachment; filename="agent-report.json"',
+            "Content-Length": str(len(raw)), "Cache-Control": "no-store",
+        })
 
     @app.post("/api/v1/runs/{run_uuid}/kill", dependencies=protected)
     def kill(request: Request, run_uuid: UUID) -> dict:

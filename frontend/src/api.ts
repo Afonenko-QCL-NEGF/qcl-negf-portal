@@ -40,6 +40,37 @@ export interface ReportEntry {
   message: string;
   time: string;
 }
+export interface AgentReportUsedRun {
+  run_uuid: string;
+  plan_fingerprint: string;
+  execution_id: string;
+  definition_id: string;
+  variant_id: string;
+  attempt: number;
+  calcjob_uuid: string;
+}
+export interface AgentReport {
+  schema: "qcl-negf-agent-report-v1";
+  anchor: {
+    run_uuid: string;
+    root_definition_id: string;
+    root_kind: "study" | "meta";
+    plan_fingerprint: string;
+  };
+  question_snapshot: string;
+  used_runs: AgentReportUsedRun[];
+  conclusion: string;
+  reasoning: string;
+  limitations: string;
+}
+export interface AgentReportReceipt {
+  uuid: string;
+  filename: string;
+  bytes: number;
+  sha256: string;
+  ctime: string;
+  anchor: AgentReport["anchor"];
+}
 export interface ExportReceipt {
   schema: string;
   transport_schema: string;

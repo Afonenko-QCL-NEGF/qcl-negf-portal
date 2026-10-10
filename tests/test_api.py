@@ -558,3 +558,203 @@ def test_exact_locator_errors_have_no_payload(locator_source, fault, status):
         ]:
             assert method(url, params=params, headers=AUTH).status_code == status
         assert not any(c[0] == "open" for c in calls)
+
+
+REPORT_UUID = "758d02d5-37d6-487b-a95e-39c59d68ae3e"
+
+
+def agent_report_raw():
+    # Independent run-view fixture: this author question is not an R01 card.
+    return json.dumps({
+        "schema": "qcl-negf-agent-report-v1",
+        "anchor": {"run_uuid": RUN, "root_definition_id": "study_alpha",
+                   "root_kind": "study", "plan_fingerprint": "a" * 64},
+        "question_snapshot": "Что измерено?",
+        "used_runs": [],
+        "conclusion": "Author says accepted; machine status remains not_converged.",
+        "reasoning": "No new numerical measurement.",
+        "limitations": "Run-view only; no stable card or canonical question proof.",
+    }, ensure_ascii=False, indent=2) + "\n"
+
+
+@pytest.fixture
+def agent_service(service):
+    import hashlib
+
+    service.report_calls = []
+    service.saved_reports = []
+    service.agent_error = None
+    service.agent_raw = agent_report_raw().encode("utf-8")
+    receipt = {
+        "uuid": REPORT_UUID, "filename": "agent-report.json",
+        "bytes": len(service.agent_raw), "sha256": hashlib.sha256(service.agent_raw).hexdigest(),
+        "ctime": "2026-01-02T00:00:00Z",
+        "anchor": json.loads(service.agent_raw)["anchor"],
+    }
+    service.agent_receipt = receipt
+
+    def gate(name, run):
+        service.report_calls.append(name)
+        if service.agent_error is not None:
+            raise service.agent_error
+        if run != RUN:
+            raise LookupError("Unknown anchor")
+
+    def save_agent_report(run, raw):
+        gate("save", run)
+        encoded = raw.encode("utf-8") if isinstance(raw, str) else raw
+        service.saved_reports.append(encoded)
+        return {**receipt, "bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
+
+    def list_agent_reports(run, *, limit=20, offset=0):
+        gate("list", run)
+        service.report_calls.append((limit, offset))
+        return [receipt]
+
+    def read_agent_report(run, report):
+        gate("read", run)
+        if report != REPORT_UUID:
+            raise LookupError("Unknown report")
+        return service.agent_raw
+
+    service.save_agent_report = save_agent_report
+    service.list_agent_reports = list_agent_reports
+    service.read_agent_report = read_agent_report
+    return service
+
+
+@pytest.fixture
+def agent_client(agent_service):
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), agent_service)) as value:
+        yield value
+
+
+@pytest.mark.parametrize("method,suffix,payload", [
+    ("post", "", {"report": "{}"}),
+    ("get", "", None),
+    ("get", "/" + REPORT_UUID, None),
+])
+def test_agent_reports_authentication_precedes_actor(agent_client, agent_service, method, suffix, payload):
+    kwargs = {"json": payload} if payload is not None else {}
+    url = f"/api/v1/runs/{RUN}/agent-reports{suffix}"
+    for headers in ({}, {"Authorization": "Bearer wrong"}):
+        assert getattr(agent_client, method)(url, headers=headers, **kwargs).status_code == 401
+    assert agent_service.report_calls == []
+    assert agent_service.saved_reports == []
+
+
+def test_agent_report_created_only_after_storage_preserves_raw_and_machine_status(agent_client, agent_service):
+    before = agent_client.get(f"/api/v1/runs/{RUN}", headers=AUTH).json()
+    old_log = agent_client.get(f"/api/v1/runs/{RUN}/report", headers=AUTH).json()
+    raw = agent_report_raw()
+    response = agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json={"report": raw})
+    assert response.status_code == 201, response.text
+    assert agent_service.saved_reports == [raw.encode("utf-8")]
+    assert response.json() == agent_service.agent_receipt
+    assert response.headers["cache-control"] == "no-store"
+    assert agent_client.get(f"/api/v1/runs/{RUN}", headers=AUTH).json() == before
+    assert before["results"]["point_1"]["status"] == "not_converged"
+    assert agent_client.get(f"/api/v1/runs/{RUN}/report", headers=AUTH).json() == old_log
+    assert "entries" in old_log and "reports" not in old_log
+
+
+def test_agent_reports_collection_pagination_is_receipts_only(agent_client, agent_service):
+    response = agent_client.get(f"/api/v1/runs/{RUN}/agent-reports?limit=7&offset=3", headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"reports": [agent_service.agent_receipt]}
+    assert agent_service.report_calls == ["list", (7, 3)]
+    assert response.headers["cache-control"] == "no-store"
+    for query in ("limit=0", "limit=101", "offset=-1", "offset=bad"):
+        agent_service.report_calls.clear()
+        assert agent_client.get(f"/api/v1/runs/{RUN}/agent-reports?{query}", headers=AUTH).status_code == 422
+        assert agent_service.report_calls == []
+
+
+def test_agent_report_download_exact_raw_attachment_without_cache(agent_client, agent_service):
+    response = agent_client.get(f"/api/v1/runs/{RUN}/agent-reports/{REPORT_UUID}", headers=AUTH)
+    assert response.status_code == 200, response.text
+    assert response.content == agent_service.agent_raw
+    assert response.headers["content-type"].split(";")[0] == "application/json"
+    assert response.headers["content-disposition"] == 'attachment; filename="agent-report.json"'
+    assert response.headers["content-length"] == str(len(agent_service.agent_raw))
+    assert response.headers["cache-control"] == "no-store"
+    assert agent_service.report_calls == ["read"]
+    assert agent_service.saved_reports == []
+
+
+@pytest.mark.parametrize("payload", [{}, {"report": {}}, {"report": 7}, {"report": None},
+                                      {"report": "{}", "status": "pass"}])
+def test_agent_report_post_strict_envelope_rejected_before_actor(agent_client, agent_service, payload):
+    assert agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json=payload).status_code == 422
+    assert agent_service.report_calls == []
+    assert agent_service.saved_reports == []
+
+
+def test_agent_report_utf8_byte_cap_exact_and_plus_one_before_actor(agent_client, agent_service):
+    report = json.loads(agent_report_raw())
+    report["conclusion"] = "μ"
+    base = json.dumps(report, ensure_ascii=False)
+    raw = base[:-1] + " " * (262144 - len(base.encode("utf-8"))) + "}"
+    assert len(raw.encode("utf-8")) == 262144 and len(raw) < 262144
+    response = agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json={"report": raw})
+    assert response.status_code == 201, response.text
+    assert agent_service.saved_reports == [raw.encode("utf-8")]
+    agent_service.report_calls.clear()
+    assert agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json={"report": raw + " "}).status_code == 422
+    assert agent_service.report_calls == []
+    assert len(agent_service.saved_reports) == 1
+    assert agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers={**AUTH, "Content-Type": "application/json"}, content=b'{"report":"\\ud800"}').status_code == 422
+    assert agent_service.report_calls == []
+
+
+@pytest.mark.parametrize("error,status", [(LookupError("Missing or wrong anchor"), 404),
+                                         (ValueError("Corrupt report binding"), 422),
+                                         (RuntimeError("Backend unavailable"), 503)])
+@pytest.mark.parametrize("method,suffix", [("post", ""), ("get", ""), ("get", "/" + REPORT_UUID)])
+def test_agent_report_backend_errors_never_publish_success(agent_client, agent_service, error, status, method, suffix):
+    agent_service.agent_error = error
+    kwargs = {"json": {"report": agent_report_raw()}} if method == "post" else {}
+    response = getattr(agent_client, method)(f"/api/v1/runs/{RUN}/agent-reports{suffix}", headers=AUTH, **kwargs)
+    assert response.status_code == status, response.text
+    operation = "save" if method == "post" else "read" if suffix else "list"
+    assert agent_service.report_calls == [operation]
+    assert agent_service.saved_reports == []
+
+
+def test_agent_report_uuid_validation_and_missing_exact_file(agent_client, agent_service):
+    assert agent_client.get(f"/api/v1/runs/not-a-uuid/agent-reports", headers=AUTH).status_code == 422
+    assert agent_client.get(f"/api/v1/runs/{RUN}/agent-reports/not-a-uuid", headers=AUTH).status_code == 422
+    assert agent_service.report_calls == []
+    assert agent_client.get(f"/api/v1/runs/{CODE}/agent-reports", headers=AUTH).status_code == 404
+    assert agent_client.get(f"/api/v1/runs/{RUN}/agent-reports/{CODE}", headers=AUTH).status_code == 404
+
+
+
+def test_agent_report_deep_outer_json_is_safe_422_before_actor(agent_client, agent_service):
+    # Wire bytes bypass the client's encoder recursion limit; the body is small.
+    body = b'{"report":"{}","extra":' + b"[" * 20000 + b"0" + b"]" * 20000 + b"}"
+    assert len(body) < 2_000_000
+    response = agent_client.post(
+        f"/api/v1/runs/{RUN}/agent-reports",
+        headers={**AUTH, "Content-Type": "application/json"}, content=body,
+    )
+    assert response.status_code == 422, response.text
+    assert isinstance(response.json()["detail"], str)
+    response.json()["detail"].encode("utf-8", "strict")
+    assert agent_service.report_calls == []
+    assert agent_service.saved_reports == []
+
+
+def test_agent_report_backend_surrogate_detail_is_safe_422(agent_client, agent_service):
+    # ASCII JSON bytes decode escaped keys to a lone surrogate in ContractError.
+    raw = r'{"\ud800":1,"\ud800":2}'
+    assert raw.encode("utf-8", "strict") == b'{"\\ud800":1,"\\ud800":2}'
+    agent_service.agent_error = ValueError("Duplicate JSON key: " + chr(0xD800))
+    response = agent_client.post(
+        f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH, json={"report": raw},
+    )
+    assert response.status_code == 422, response.text
+    assert isinstance(response.json()["detail"], str)
+    response.json()["detail"].encode("utf-8", "strict")
+    assert agent_service.report_calls == ["save"]
+    assert agent_service.saved_reports == []

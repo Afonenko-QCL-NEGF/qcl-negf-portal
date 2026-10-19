@@ -1,6 +1,20 @@
 # Contributing
 
-Use Python 3.14 and Node.js 24 for the reference development environment. Follow the build and test commands in the README. Keep HTTP handling, AiiDA orchestration and numerical analysis in their respective packages.
+For documentation-only text or link corrections, review the diff and check changed
+links, anchors and formatting. No Python/Node installation, Julia, full suite or
+browser build is required. Record numerical, rendering and browser checks that
+were not run. Executable examples, recipes and API or interface changes need the
+relevant checks for their behavior.
+
+Use Python 3.14 and Node.js 24 for the reference development environment. For code
+changes, run relevant backend or browser-client checks in a prepared environment.
+Follow the README's installation, complete-suite and build commands in their
+separately assigned stages with a finite shared budget. `deno task test:frontend`
+installs locked npm dependencies, tests and type-checks the client, and builds the
+bundle; it is not a source-only check. Missing runtime remains a reported check
+limitation. Preserve the fixed light theme required by [AGENTS.md](AGENTS.md).
+Keep HTTP handling, AiiDA orchestration and numerical analysis in their respective
+packages.
 
 Changes to a public API require an accompanying API test and a coordinated change in the browser client. Test rejected requests as well as successful operations. Scientific acceptance must remain distinct from process exit status. Avoid browser persistence of access tokens and do not put credentials in example files.
 

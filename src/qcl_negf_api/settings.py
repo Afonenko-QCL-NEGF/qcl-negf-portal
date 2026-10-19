@@ -1,10 +1,21 @@
 """Fail-closed runtime configuration; credentials never enter build artifacts."""
 
+import math
 import os
 import re
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path, PurePosixPath
 from uuid import UUID
+
+ACTOR_DEFAULTS = {
+    "actor_initialize_timeout_seconds": 30.0,
+    "actor_call_timeout_seconds": 30.0,
+    "actor_io_timeout_seconds": 15.0,
+    "actor_close_timeout_seconds": 10.0,
+    "actor_max_pending_calls": 16,
+    "actor_max_open_artifacts": 8,
+}
 
 
 @dataclass(frozen=True)
@@ -24,7 +35,24 @@ class Settings:
     export_disk_bytes: int = 100 * 1024**3
     export_ttl_seconds: int = 86400
 
+    actor_initialize_timeout_seconds: float = ACTOR_DEFAULTS["actor_initialize_timeout_seconds"]
+    actor_call_timeout_seconds: float = ACTOR_DEFAULTS["actor_call_timeout_seconds"]
+    actor_io_timeout_seconds: float = ACTOR_DEFAULTS["actor_io_timeout_seconds"]
+    actor_close_timeout_seconds: float = ACTOR_DEFAULTS["actor_close_timeout_seconds"]
+    actor_max_pending_calls: int = ACTOR_DEFAULTS["actor_max_pending_calls"]
+    actor_max_open_artifacts: int = ACTOR_DEFAULTS["actor_max_open_artifacts"]
+
     def __post_init__(self) -> None:
+        for name in ACTOR_DEFAULTS:
+            value = getattr(self, name)
+            maximum = 256 if name == "actor_max_pending_calls" else 64
+            if name.endswith("_seconds"):
+                valid = (not isinstance(value, bool) and isinstance(value, Real)
+                         and math.isfinite(value) and 0 < value <= 300)
+            else:
+                valid = type(value) is int and 1 <= value <= maximum
+            if not valid:
+                raise ValueError(f"Invalid {name}")
         if len(self.token) < 32 or not self.token.isascii():
             raise ValueError("API token must contain at least 32 ASCII characters")
         if not self.allowed_codes:
@@ -90,6 +118,15 @@ class Settings:
             )
             if "QCL_NEGF_" + name.upper() in os.environ
         }
+        for name in ACTOR_DEFAULTS:
+            raw = os.environ.get("QCL_NEGF_" + name.upper())
+            if raw is not None:
+                if name.endswith("_seconds"):
+                    limits[name] = float(raw)
+                else:
+                    if not raw.isdecimal():
+                        raise ValueError(f"Invalid {name}")
+                    limits[name] = int(raw)
         return cls(
             token=Path(token_file).read_text(encoding="ascii").strip(),
             allowed_codes=codes,

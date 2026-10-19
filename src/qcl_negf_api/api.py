@@ -22,7 +22,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
 from .exports import ExportBusy, ExportStorage, ExportStore
-from .service import AiidaService
+from .service import ActorDeadline, ActorOutcomeUnknown, ActorUnavailable, AiidaService
 from .settings import Settings
 
 LOG = logging.getLogger(__name__)
@@ -144,16 +144,19 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if service is None:
-            app.state.service = AiidaService(settings.profile)
+            app.state.service = AiidaService(settings.profile, settings=settings)
         else:
             app.state.service = service
         app.state.exports = ExportStore(app.state.service, settings)
         try:
             yield
         finally:
-            app.state.exports.close()
-            if service is None:
-                app.state.service.close()
+            deadline = time.monotonic() + settings.actor_close_timeout_seconds
+            try:
+                app.state.exports.close(deadline=deadline)
+            finally:
+                if service is None:
+                    app.state.service.close(deadline=deadline)
 
     app = FastAPI(
         title="QCL-NEGF API",
@@ -224,9 +227,45 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             "WWW-Authenticate": "Bearer",
         })
 
+    def actor_error(exc: ActorUnavailable) -> HTTPException:
+        receipt = exc.receipt
+        headers = {
+            "X-QCL-Operation-ID": receipt.operation_id,
+            "X-QCL-Operation-Outcome": receipt.outcome,
+            "X-QCL-Actor-State": receipt.actor_state,
+            "X-QCL-Auto-Retry": "false",
+            "Cache-Control": "no-store",
+        }
+        if receipt.unresolved_operation_id is not None:
+            headers["X-QCL-Unresolved-Operation-ID"] = receipt.unresolved_operation_id
+        if isinstance(exc, ActorOutcomeUnknown):
+            status = exc.backend_status or 503
+            detail = ("Mutation outcome is unknown. Do not submit or repeat the mutation; "
+                      "reconcile existing provenance. Operation: " + receipt.operation_id + ".")
+            if status == 422:
+                detail = "Backend validation was refused. " + detail
+        elif exc.code == "mutation_unresolved":
+            status = 503
+            detail = ("An earlier mutation is unresolved. Do not repeat it; reconcile provenance. "
+                      "Operation: " + receipt.unresolved_operation_id + ".")
+        elif isinstance(exc, ActorDeadline):
+            status = 504
+            if receipt.outcome == "not_started":
+                detail = ("AiiDA operation did not start before its response deadline. "
+                          "Do not retry automatically. Operation: " + receipt.operation_id + ".")
+            else:
+                detail = ("AiiDA response deadline expired; the backend operation may still be "
+                          "running. Operation: " + receipt.operation_id + ".")
+        else:
+            status = 503
+            detail = "AiiDA service cannot accept this operation (" + exc.code + ")."
+        return HTTPException(status, detail, headers=headers)
+
     def export_call(request: Request, method: str, *args: Any, **kwargs: Any) -> Any:
         try:
             return getattr(request.app.state.exports, method)(*args, **kwargs)
+        except ActorUnavailable as exc:
+            raise actor_error(exc) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ExportBusy as exc:
@@ -250,6 +289,8 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     def invoke(request: Request, method: str, *args: Any, **kwargs: Any) -> Any:
         try:
             return getattr(request.app.state.service, method)(*args, **kwargs)
+        except ActorUnavailable as exc:
+            raise actor_error(exc) from exc
         except LookupError as exc:
             raise HTTPException(404, "Workflow or artifact was not found") from exc
         except ValueError as exc:
@@ -262,7 +303,7 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
         try:
             return invoke(request, method, *args, **kwargs)
         except HTTPException as exc:
-            if exc.status_code == 422:
+            if exc.status_code == 422 and not (exc.headers or {}).get("X-QCL-Operation-ID"):
                 # Backend validation can include a decoded lone-surrogate key.
                 # Keep report refusals safe without changing existing API errors.
                 raise HTTPException(422, "Agent report validation was refused") from exc

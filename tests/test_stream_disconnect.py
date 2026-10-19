@@ -42,7 +42,26 @@ async def test_asgi_disconnect_closes_reader_and_releases_export_lease(
         finally:
             stream.close()
 
+    def selection(run, execution, *, attempt=None, calcjob_uuid=None):
+        assert (run, execution) == (RUN, "point_1")
+        assert attempt in (None, 1) and calcjob_uuid in (None, CODE)
+        return {"execution_id": execution, "attempt": 1, "calcjob_uuid": CODE,
+                "status": "unknown"}
+
+    def inventory(run, execution, *, attempt=None, calcjob_uuid=None):
+        assert (run, execution, attempt, calcjob_uuid) == (RUN, "point_1", 1, CODE)
+        return [{"execution_id": execution, "attempt": 1, "calcjob_uuid": CODE,
+                 "path": path, "size": size}
+                for path, size in [("result/native.bin", 4), ("raw.bin", len(payload))]]
+
+    def plan(run, execution, *, attempt=None, calcjob_uuid=None):
+        assert (run, execution, attempt, calcjob_uuid) == (RUN, "point_1", 1, CODE)
+        return {"plan": b"{}", "source": "aiida.input.plan",
+                "sha256": hashlib.sha256(b"{}").hexdigest(), "bytes": 2}
+
     service = SimpleNamespace(
+        get_export_selection=selection,
+        list_execution_artifacts=inventory,
         get_artifact_metadata=lambda *args, **kwargs: {
             "execution_id": "point_1", "path": "raw.bin", "size": len(payload),
             "attempt": 1, "calcjob_uuid": CODE,
@@ -53,7 +72,7 @@ async def test_asgi_disconnect_closes_reader_and_releases_export_lease(
         ],
         open_artifact=open_artifact,
         get_run=lambda run: {"results": {}},
-        get_export_plan=lambda run, execution: {"plan": b"{}", "source": "aiida.input.plan"},
+        get_export_plan=plan,
     )
 
     def export_snapshot(root, destination, **kwargs):

@@ -550,6 +550,8 @@ def test_expired_exact_export_is_removed_and_prepared_again(composite_source, mo
         store._entries[old["export_id"]]["expires_unix"] = time.time() - 1
         with pytest.raises(LookupError):
             store.get(old["export_id"])
+        # Expiry marks metadata; the sole worker confirms actual deletion.
+        store._executor.submit(lambda: None).result(timeout=2)
         assert not (store._root / old["export_id"]).exists()
         new = store.create(RUN, source.execution, "science")
         assert new["export_id"] != old["export_id"]

@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 from qcl_negf_contracts.artifacts import validate_export_receipt
 from qcl_negf_results.export_budget import DEFAULT_RESERVE_BYTES
 
+from .service import ActorUnavailable, CloseResult
 from .settings import Settings
 
 LOG = logging.getLogger(__name__)
@@ -42,8 +43,21 @@ class ExportStore:
         self.service, self.settings = service, settings
         self._temporary = tempfile.TemporaryDirectory(prefix="qcl-negf-exports-")
         self._root = Path(self._temporary.name)
+        # The retained store, never GC, decides when leases permit root cleanup.
+        self._temporary._finalizer.detach()
         self._lock = threading.RLock()
         self._cancelled = threading.Event()
+        self._lifecycle = threading.Condition()
+        self._close_requested = False
+        self._terminal = None
+        self._maintenance_scheduled = False
+        self._maintenance_running = False
+        self._maintenance_dirty = False
+        self._preparation = None
+        self._lease_changed = threading.Event()
+        self._expiry_pending = threading.Event()
+        self._root_claimed = False
+        self._cleanup_failure = None
         self._entries: dict[str, dict[str, Any]] = {}
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="qcl-negf-export")
 
@@ -52,13 +66,14 @@ class ExportStore:
         for identifier, entry in list(self._entries.items()):
             if (entry["state"] != "preparing" and entry["expires_unix"] <= now
                     and not entry["readers"]):
-                shutil.rmtree(self._root / identifier, ignore_errors=True)
-                del self._entries[identifier]
+                entry["delete_pending"] = True
+                self._expiry_pending.set()
 
     @staticmethod
     def _public(entry: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in entry.items()
-                if key not in {"readers", "reserved", "source_bytes"}}
+                if key not in {"readers", "reserved", "source_bytes", "delete_pending",
+                               "delete_claimed", "delete_error", "directory_deleted"}}
 
     @staticmethod
     def _stored_bytes(directory: Path) -> int:
@@ -77,23 +92,37 @@ class ExportStore:
             return min(remaining, free)
 
     def get(self, identifier: str) -> dict[str, Any]:
-        with self._lock:
-            self._cleanup()
-            entry = self._entries.get(identifier)
-            if entry is None or entry["expires_unix"] <= time.time():
-                raise LookupError("Export is unavailable or expired; prepare it again")
-            return self._public(entry)
+        try:
+            with self._lock:
+                self._cleanup()
+                entry = self._entries.get(identifier)
+                if (entry is None or entry["expires_unix"] <= time.time()
+                        or entry.get("delete_pending", False)):
+                    raise LookupError("Export is unavailable or expired; prepare it again")
+                return self._public(entry)
+        finally:
+            self._request_maintenance()
 
     def _selection_call(self, operation: str, *args: Any, **kwargs: Any) -> Any:
         try:
             return getattr(self.service, operation)(*args, **kwargs)
-        except (LookupError, ValueError):
+        except (ActorUnavailable, LookupError, ValueError):
             raise
         except Exception as exc:
             raise RuntimeError("Exact export selection service is unavailable") from exc
 
     def create(self, run: str, execution_id: str, profile: str, *,
                attempt=None, calcjob_uuid=None) -> dict[str, Any]:
+        if self._cancelled.is_set():
+            raise ExportBusy("Export service is stopping")
+        try:
+            return self._create(run, execution_id, profile,
+                                attempt=attempt, calcjob_uuid=calcjob_uuid)
+        finally:
+            self._request_maintenance()
+
+    def _create(self, run: str, execution_id: str, profile: str, *,
+                attempt=None, calcjob_uuid=None) -> dict[str, Any]:
         try:
             if not isinstance(run, str):
                 raise ValueError
@@ -154,23 +183,35 @@ class ExportStore:
         with self._lock:
             self._cleanup()
             if self._cancelled.is_set():
-                raise RuntimeError("Export service is stopping")
+                raise ExportBusy("Export service is stopping")
             for identifier, entry in list(self._entries.items()):
                 if ((entry["run_uuid"], entry["execution_id"], entry["attempt"],
                      entry["calcjob_uuid"], entry["profile"])
                         == (run, execution_id, binding["attempt"], binding["calcjob_uuid"], profile)
-                        and entry["expires_unix"] > time.time()):
+                        and entry["expires_unix"] > time.time()
+                        and not entry.get("delete_pending", False)):
                     if entry["state"] in {"preparing", "ready"}:
                         if entry["status"] == binding["status"]:
                             return self._public(entry)
-                    else:
+                    elif entry.get("directory_deleted", False):
                         del self._entries[identifier]
-            if any(entry["state"] == "preparing" for entry in self._entries.values()):
+                    else:
+                        entry["delete_pending"] = True
+                        self._expiry_pending.set()
+            with self._lifecycle:
+                maintenance = self._maintenance_scheduled
+            if maintenance or any(
+                entry["state"] == "preparing" for entry in self._entries.values()
+            ):
                 raise ExportBusy("Another archive is being prepared; try again after it finishes")
             used = sum(entry["reserved"] for entry in self._entries.values())
             if (len(self._entries) >= 128 or used + reservation > self.settings.export_disk_bytes
                     or reservation + DEFAULT_RESERVE_BYTES > shutil.disk_usage(self._root).free):
                 raise ExportStorage("Complete retrieved snapshot exceeds available export storage")
+            # disk_usage may stall while close independently installs its latch.
+            with self._lifecycle:
+                if self._close_requested or self._maintenance_scheduled:
+                    raise ExportBusy("Export service is stopping or cleaning temporary output")
             identifier = str(uuid4())
             entry = {
                 "export_id": identifier, "run_uuid": run, **binding,
@@ -179,7 +220,11 @@ class ExportStore:
                 "reserved": reservation, "readers": 0, "source_bytes": source_bytes,
             }
             self._entries[identifier] = entry
-            self._executor.submit(self._prepare, identifier, entries, source_bytes)
+            # Registration is completed before releasing the store lock. A close
+            # task queued first observes and cancels this exact queued preparation.
+            future = self._executor.submit(self._prepare, identifier, entries, source_bytes)
+            with self._lifecycle:
+                self._preparation = future
             return self._public(entry)
 
     def _progress(self, identifier: str, progress: dict[str, Any]) -> None:
@@ -200,6 +245,8 @@ class ExportStore:
         try:
             from qcl_negf_results.export import export_snapshot
 
+            if self._cancelled.is_set():
+                raise CancelledError("Archive preparation cancelled by service shutdown")
             try:
                 frozen = self.service.get_export_plan(
                     entry["run_uuid"], entry["execution_id"],
@@ -215,6 +262,8 @@ class ExportStore:
             self._progress(identifier, {"phase": "retrieving"})
             count = 0
             for item in inventory:
+                if self._cancelled.is_set():
+                    raise CancelledError("Archive preparation cancelled by service shutdown")
                 target = source / item["path"]
                 target.parent.mkdir(parents=True, exist_ok=True)
                 copied = 0
@@ -222,7 +271,14 @@ class ExportStore:
                     entry["run_uuid"], entry["execution_id"], item["path"],
                     attempt=entry["attempt"], calcjob_uuid=entry["calcjob_uuid"],
                 ) as stream, target.open("xb") as handle:
-                    while data := stream.read(BLOCK):
+                    while True:
+                        if self._cancelled.is_set():
+                            raise CancelledError(
+                                "Archive preparation cancelled by service shutdown"
+                            )
+                        data = stream.read(BLOCK)
+                        if not data:
+                            break
                         copied += len(data)
                         if copied > item["size"]:
                             raise ValueError("Retrieved artifact size differs from inventory")
@@ -250,18 +306,34 @@ class ExportStore:
                 raise ValueError("Archive size differs from receipt")
             # Reconcile receipt/metadata tails and any remaining spool before ready.
             self._storage(identifier, self._stored_bytes(directory))
-            shutil.rmtree(source)
+            try:
+                shutil.rmtree(source)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # A failed source-removal claim cannot be retried indirectly
+                # through its parent directory or a later root cleanup.
+                with self._lock:
+                    entry["delete_claimed"] = True
+                    entry["delete_error"] = self._cleanup_failure = "store_cleanup_failed"
+                raise
             retained = self._stored_bytes(directory)
             with self._lock:
                 self._storage(identifier, retained)
-                entry.update(state="ready", receipt=receipt, reserved=retained,
-                             expires_unix=time.time() + self.settings.export_ttl_seconds)
+                with self._lifecycle:
+                    if self._close_requested:
+                        raise CancelledError("Archive preparation cancelled by service shutdown")
+                    entry.update(state="ready", receipt=receipt, reserved=retained,
+                                 expires_unix=time.time() + self.settings.export_ttl_seconds)
         except Exception as exc:
-            if isinstance(exc, CancelledError):
+            if isinstance(exc, ActorUnavailable):
+                LOG.info("Archive actor unavailable operation=%s outcome=%s",
+                         exc.receipt.operation_id, exc.receipt.outcome)
+            elif isinstance(exc, CancelledError):
                 LOG.info("Archive preparation cancelled for export %s", identifier)
             else:
                 LOG.exception("Archive preparation failed for export %s", identifier)
-            shutil.rmtree(directory, ignore_errors=True)
+            removed = self._remove_directory(identifier, retain_metadata=True)
             error = (
                 "Frozen plan is unavailable or invalid; inspect the control host service log"
                 if isinstance(exc, ExportPlan) else
@@ -269,26 +341,183 @@ class ExportStore:
             )
             with self._lock:
                 entry.update(
-                    state="failed", reserved=0,
+                    state="failed", reserved=0 if removed else entry["reserved"],
                     error=error,
                 )
+        finally:
+            if self._cancelled.is_set():
+                self._request_maintenance()
 
     @contextmanager
     def open(self, identifier: str):
-        with self._lock:
-            entry = self.get(identifier)
-            if entry["state"] != "ready":
-                raise ExportBusy("The archive is not ready for download")
-            self._entries[identifier]["readers"] += 1
-            path = self._root / identifier / "archive" / entry["receipt"]["archive"]
+        if self._cancelled.is_set():
+            raise ExportBusy("Export service is stopping")
         try:
-            with path.open("rb") as stream:
-                yield stream
-        finally:
             with self._lock:
-                self._entries[identifier]["readers"] -= 1
+                if self._cancelled.is_set():
+                    raise ExportBusy("Export service is stopping")
+                self._cleanup()
+                original = self._entries.get(identifier)
+                if (original is None or original["expires_unix"] <= time.time()
+                        or original.get("delete_pending", False)):
+                    raise LookupError("Export is unavailable or expired; prepare it again")
+                if original["state"] != "ready":
+                    raise ExportBusy("The archive is not ready for download")
+                original["readers"] += 1
+                path = self._root / identifier / "archive" / original["receipt"]["archive"]
+            try:
+                with path.open("rb") as stream:
+                    yield stream
+            finally:
+                with self._lock:
+                    original["readers"] -= 1
+                self._lease_changed.set()
+        finally:
+            self._request_maintenance()
 
-    def close(self) -> None:
-        self._cancelled.set()
-        self._executor.shutdown(wait=True, cancel_futures=True)
-        self._temporary.cleanup()
+    def _request_maintenance(self):
+        # No store-lock acquisition or Future callbacks under lifecycle control.
+        if not self._cancelled.is_set() and not self._expiry_pending.is_set():
+            return
+        with self._lifecycle:
+            if self._terminal is not None:
+                return
+            self._maintenance_dirty = True
+            if self._maintenance_scheduled:
+                return
+            self._maintenance_scheduled = True
+        try:
+            self._executor.submit(self._maintain)
+        except RuntimeError:
+            with self._lifecycle:
+                self._terminal = CloseResult("failed", None, None, "store_cleanup_failed")
+                self._lifecycle.notify_all()
+
+    def _remove_directory(self, identifier, *, retain_metadata=False):
+        with self._lock:
+            entry = self._entries[identifier]
+            if entry.get("directory_deleted", False):
+                if not retain_metadata:
+                    del self._entries[identifier]
+                return True
+            if entry.get("delete_claimed", False) or entry["readers"]:
+                return False
+            entry["delete_claimed"] = True
+        try:
+            shutil.rmtree(self._root / identifier)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            with self._lock:
+                entry["delete_error"] = "store_cleanup_failed"
+                self._cleanup_failure = "store_cleanup_failed"
+            return False
+        with self._lock:
+            entry["reserved"] = 0
+            entry["directory_deleted"] = True
+            if not retain_metadata:
+                del self._entries[identifier]
+        return True
+
+    def _counts(self):
+        operations = int(self._preparation is not None and not self._preparation.done())
+        readers = sum(entry["readers"] for entry in self._entries.values())
+        return operations, readers
+
+    def _maintain(self):
+        with self._lifecycle:
+            self._maintenance_running = True
+        try:
+            while True:
+                with self._lifecycle:
+                    self._maintenance_dirty = False
+                    closing = self._close_requested
+                self._lease_changed.clear()
+                with self._lock:
+                    # A close queued before a late create submit must cancel its
+                    # preparation before treating the directory as writer-free.
+                    preparation = self._preparation
+                if closing and preparation is not None:
+                    preparation.cancel()  # eager callbacks run outside both locks
+                with self._lock:
+                    operations, readers = self._counts()
+                    self._expiry_pending.clear()
+                    if closing and not operations:
+                        for entry in self._entries.values():
+                            entry["delete_pending"] = True
+                    deletions = [identifier for identifier, entry in self._entries.items()
+                                 if entry.get("delete_pending", False) and not entry["readers"]
+                                 and not entry.get("delete_claimed", False)
+                                 and (entry["state"] != "preparing" or not operations)]
+                for identifier in deletions:
+                    self._remove_directory(identifier)
+                with self._lock:
+                    operations, readers = self._counts()
+                    failure = self._cleanup_failure
+                if closing and failure is not None:
+                    result = CloseResult("failed", operations, readers, failure)
+                    self._finish(result)
+                    return
+                if closing and not operations and not readers:
+                    with self._lifecycle:
+                        if not self._root_claimed:
+                            self._root_claimed = True
+                            cleanup = True
+                        else:
+                            cleanup = False
+                    if cleanup:
+                        try:
+                            self._temporary.cleanup()
+                        except OSError:
+                            self._finish(CloseResult("failed", 0, 0, "store_cleanup_failed"))
+                            return
+                    self._finish(CloseResult("completed", 0, 0))
+                    return
+                if closing:
+                    self._lease_changed.wait()
+                    continue
+                with self._lifecycle:
+                    if self._maintenance_dirty or self._close_requested:
+                        continue
+                    self._maintenance_running = self._maintenance_scheduled = False
+                    return
+        except BaseException:
+            self._finish(CloseResult("failed", None, None, "store_cleanup_failed"))
+
+    def _finish(self, result):
+        with self._lifecycle:
+            self._terminal = result
+            self._maintenance_running = self._maintenance_scheduled = False
+            self._lifecycle.notify_all()
+        self._executor.shutdown(wait=False)
+
+    def close(self, *, deadline: float | None = None) -> CloseResult:
+        local = time.monotonic() + self.settings.actor_close_timeout_seconds
+        deadline = local if deadline is None else min(local, deadline)
+        with self._lifecycle:
+            if self._terminal is not None:
+                return self._terminal
+            self._close_requested = True
+            self._cancelled.set()
+            preparation = self._preparation
+        if preparation is not None:
+            preparation.cancel()  # callbacks must never run under lifecycle control
+        self._lease_changed.set()
+        self._request_maintenance()
+        remaining = max(0, deadline - time.monotonic())
+        acquired = (self._lock.acquire(timeout=remaining) if remaining
+                    else self._lock.acquire(blocking=False))
+        operations = readers = None
+        if acquired:
+            try:
+                operations, readers = self._counts()
+            finally:
+                self._lock.release()
+        with self._lifecycle:
+            while self._terminal is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return CloseResult("stopping", operations, readers,
+                                       None if acquired else "store_metadata_pending")
+                self._lifecycle.wait(remaining)
+            return self._terminal

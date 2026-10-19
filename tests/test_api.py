@@ -822,3 +822,47 @@ def test_composite_missing_producer_is_503_without_legacy_fallback(client, servi
     response = client.post(f"/api/v1/runs/{RUN}/exports", headers=AUTH,
                            json={"execution_id": "point_1"})
     assert response.status_code == 503
+
+
+@pytest.mark.parametrize("backend_status", [404, 422, 503])
+def test_unknown_report_mutation_preserves_safe_category_and_diagnostic_headers(
+    agent_client, agent_service, backend_status,
+):
+    from qcl_negf_api.service import ActorOutcomeUnknown, ActorReceipt
+    operation = "017b5339-4d28-4839-8239-d8a229a691f8"
+    receipt = ActorReceipt(operation, "save_agent_report", "unknown", "ready", RUN)
+    exception = ActorOutcomeUnknown("mutation_outcome_unknown", receipt, backend_status=backend_status)
+    exception.__cause__ = ValueError("private://credential-token/secret")
+    def refused(*args):
+        raise exception
+    agent_service.save_agent_report = refused
+    response = agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH,
+                                 json={"report": agent_report_raw()})
+    assert response.status_code == backend_status
+    assert isinstance(response.json()["detail"], str)
+    assert "Mutation outcome is unknown" in response.json()["detail"]
+    assert "Do not submit or repeat" in response.json()["detail"]
+    assert "private:" not in response.text and "credential-token" not in response.text
+    assert response.headers["x-qcl-operation-id"] == operation
+    assert response.headers["x-qcl-operation-outcome"] == "unknown"
+    assert response.headers["x-qcl-auto-retry"] == "false"
+    assert response.headers["cache-control"] == "no-store"
+    assert "retry-after" not in response.headers
+
+
+def test_mutation_fence_headers_identify_new_refusal_and_original_unknown(agent_client, agent_service):
+    from qcl_negf_api.service import ActorReceipt, ActorUnavailable
+    operation = "017b5339-4d28-4839-8239-d8a229a691f8"
+    original = "5ff92dad-ec07-4d54-ac4c-e2e76d092584"
+    receipt = ActorReceipt(operation, "save_agent_report", "not_started", "ready", RUN,
+                           unresolved_operation_id=original)
+    def refused(*args):
+        raise ActorUnavailable("mutation_unresolved", receipt)
+    agent_service.save_agent_report = refused
+    response = agent_client.post(f"/api/v1/runs/{RUN}/agent-reports", headers=AUTH,
+                                 json={"report": agent_report_raw()})
+    assert response.status_code == 503
+    assert response.headers["x-qcl-operation-id"] == operation
+    assert response.headers["x-qcl-unresolved-operation-id"] == original
+    assert response.headers["x-qcl-operation-outcome"] == "not_started"
+    assert original in response.json()["detail"]

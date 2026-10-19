@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "check": "tsc --noEmit",
-    "build": "tsc --noEmit && vite build",
+    "build": "node tools/asset-receipt.mjs build",
     "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {

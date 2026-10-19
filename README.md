@@ -162,7 +162,19 @@ python3 -m unittest discover -s tests -p test_ci_environment.py
 It checks argument order, working directory, the explicit environment and exit propagation
 without installing packages, contacting a registry or building frontend assets.
 
-`npm run build` writes assets to `src/qcl_negf_api/static/`, which the wheel includes. Release wheel construction rejects missing browser assets. Editable development installation permits the API to run before the browser is built. Generated assets and dependency directories are ignored by Git. `nix/frontend.nix` builds browser assets with the verified npm dependency hash committed alongside the recipe. The platform uses this derivation when building the API wheel from the same root `uv.lock`; Python dependencies are not declared again in a separate Nix package definition. After updating `frontend/package-lock.json`, run `deno task lock:nix` in the Nix development shell to regenerate `nix/generated-npm-hash.json`; do not edit its hash manually.
+`npm run build` writes assets to `src/qcl_negf_api/static/`, which the wheel includes. The current release hook rejects missing index/JS files; it does not establish that existing assets match the current TypeScript, lock or build recipe. For a standalone source checkout with prepared locked dependencies, build the frontend immediately before the wheel:
+
+```console
+npm --prefix frontend ci --ignore-scripts
+npm --prefix frontend run build
+uv build --wheel --no-sources --out-dir dist
+```
+
+These are build-stage commands; dependency preparation and build cost need their own admission. Retain the exact source/lock identities and wheel SHA-256. The proposed [package identity contract](docs/package-identity.md) specifies the DEV20 generated receipt and fail-closed stale/output checks. Its wrapper independently clears and recreates only the selected, safely owned generated output before TypeScript/Vite; a zero-exit build without new files in that root must fail. Its generator and stronger wheel guard are not implemented by this documentation change. Until that implementation and route-specific verification exist, a successful direct wheel build alone is not source-freshness evidence.
+
+Editable development installation permits the API to run before the browser is built and makes no release browser-asset claim. Workspace editable imports, standalone wheels/editables, Julia Core tag/path resolution and Nix closures require separate source/import receipts; the shared `0.2.0` version does not transfer acceptance. The package identity document defines the required fields and boundaries.
+
+Generated assets and dependency directories are ignored by Git. `nix/frontend.nix` builds browser assets with the verified npm dependency hash committed alongside the recipe, replacing only Vite's output directory with `dist`. Its source filter excludes `node_modules`/`dist` basenames recursively and applies `cleanSourceFilter`. The platform copies the complete output into the API wheel build from the same root `uv.lock`; Python dependencies are not declared again in a separate Nix package definition. The proposed receipt has an explicit `nix-dist` mode for this existing transform. Compatibility is limited to source trees whose full input inventory survives the Nix projection; a source file lost by filtering must fail verification rather than be silently ignored. Native acceptance is separate from the standalone route. After updating `frontend/package-lock.json`, run `deno task lock:nix` in the Nix development shell to regenerate `nix/generated-npm-hash.json`; do not edit its hash manually. Root release construction continues to call its own frontend build before packaging. All routes retain local same-origin assets and the fixed light theme.
 
 For local browser development run the API on port 8080 and `npm --prefix frontend run dev`; Vite proxies `/api` to the local API. Production serves the built files directly; it does not run the Vite development server.
 

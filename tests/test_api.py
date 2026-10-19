@@ -95,6 +95,58 @@ def test_authentication_and_private_schema(client):
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}],
+                         ids=["missing-bearer", "wrong-bearer"])
+@pytest.mark.parametrize(
+    "method,path,kwargs,expected_calls,status",
+    [
+        pytest.param("get", "/api/v1/runs", {}, ["list_runs"], 200, id="list"),
+        pytest.param("post", "/api/v1/runs", {"json": {"plan": "{}", "code_uuid": CODE}},
+                     ["submit_plan"], 202, id="submit"),
+        pytest.param("get", f"/api/v1/runs/{RUN}/artifacts", {},
+                     ["list_artifacts"], 200, id="inventory"),
+        pytest.param("get", f"/api/v1/runs/{RUN}/artifact",
+                     {"params": {"execution_id": "point_1", "path": "result.json"}},
+                     ["get_artifact_metadata", "open_artifact"], 200, id="artifact-get"),
+        pytest.param("head", f"/api/v1/runs/{RUN}/artifact",
+                     {"params": {"execution_id": "point_1", "path": "result.json"}},
+                     ["get_artifact_metadata"], 200, id="artifact-head"),
+        pytest.param("post", f"/api/v1/runs/{RUN}/artifact/authorize",
+                     {"params": {"execution_id": "point_1", "path": "result.json"}},
+                     ["get_artifact_metadata"], 200, id="artifact-authorize"),
+        pytest.param("post", f"/api/v1/runs/{RUN}/kill", {},
+                     ["kill_run"], 200, id="kill"),
+    ],
+)
+def test_rejected_bearer_never_reaches_service_facade(
+    service, headers, method, path, kwargs, expected_calls, status,
+):
+    # Witness the request -> facade boundary, not construction/execution of a real actor.
+    # The existing synthetic service keeps submit/kill free of profiles and external jobs.
+    facade_calls = []
+
+    def counted(name, operation):
+        def call(*args, **kw):
+            # Count the attempted call even when the delegated operation raises.
+            facade_calls.append(name)
+            return operation(*args, **kw)
+        return call
+
+    facade = SimpleNamespace(**{
+        name: counted(name, operation)
+        for name, operation in vars(service).items() if callable(operation)
+    })
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), facade)) as client:
+        response = client.request(method, path, headers=headers, **kwargs)
+        assert response.status_code == 401, response.text
+        assert facade_calls == []
+
+        # A separate healthy control proves the wrappers observe the selected boundary.
+        response = client.request(method, path, headers=AUTH, **kwargs)
+        assert response.status_code == status, response.text
+        assert facade_calls == expected_calls
+
+
 def test_browser_is_served_from_the_python_package(client):
     response = client.get("/")
     assert response.status_code == 200

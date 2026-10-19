@@ -106,6 +106,8 @@ class ExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     execution_id: str = Field(min_length=1, max_length=128)
     profile: Literal["science", "full-state"] = "science"
+    attempt: int | None = Field(default=None, ge=1)
+    calcjob_uuid: UUID | None = Field(default=None, strict=False)
 
 
 def byte_range(request: Request, size: int, etag: str | None = None) -> tuple[int, int, int]:
@@ -222,9 +224,9 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             "WWW-Authenticate": "Bearer",
         })
 
-    def export_call(request: Request, method: str, *args: Any) -> Any:
+    def export_call(request: Request, method: str, *args: Any, **kwargs: Any) -> Any:
         try:
-            return getattr(request.app.state.exports, method)(*args)
+            return getattr(request.app.state.exports, method)(*args, **kwargs)
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ExportBusy as exc:
@@ -235,7 +237,10 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             raise HTTPException(422, str(exc)) from exc
         except RuntimeError as exc:
             LOG.exception("Archive service unavailable")
-            raise HTTPException(503, "Archive service is unavailable") from exc
+            detail = ("Exact export selection service is unavailable"
+                      if str(exc) == "Exact export selection service is unavailable"
+                      else "Archive service is unavailable")
+            raise HTTPException(503, detail) from exc
     resource_defaults = {
         **Resources().model_dump(),
         "max_memory_kb": settings.default_memory_kb,
@@ -481,7 +486,11 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
 
     @app.post("/api/v1/runs/{run_uuid}/exports", dependencies=protected, status_code=202)
     def prepare_export(request: Request, run_uuid: UUID, body: ExportRequest) -> dict:
-        return export_call(request, "create", str(run_uuid), body.execution_id, body.profile)
+        return export_call(
+            request, "create", str(run_uuid), body.execution_id, body.profile,
+            attempt=body.attempt,
+            calcjob_uuid=str(body.calcjob_uuid) if body.calcjob_uuid is not None else None,
+        )
 
     @app.get("/api/v1/exports/{export_id}", dependencies=protected)
     def export_status(request: Request, export_id: UUID) -> dict:

@@ -13,6 +13,8 @@ OPERATIONS = frozenset(
         "list_runs",
         "get_run",
         "get_export_plan",
+        "get_export_selection",
+        "list_execution_artifacts",
         "submit_plan",
         "get_run_report",
         "save_agent_report",

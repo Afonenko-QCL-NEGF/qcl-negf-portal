@@ -12,6 +12,7 @@ export interface Run {
 }
 export interface ChildRun extends Run {
   execution_id: string;
+  attempt: number;
   retrieved_uuid?: string;
 }
 export interface Resources {
@@ -81,9 +82,14 @@ export interface ExportReceipt {
   profile: "science" | "full-state";
   complete: boolean;
 }
-export interface ExportStatus {
+export interface ExportSelection {
+  attempt: number;
+  calcjob_uuid: string;
+}
+export interface ExportStatus extends ExportSelection {
   export_id: string;
   execution_id: string;
+  status: "running" | "completed" | "completed_with_warnings" | "failed" | "cancelled" | "paused" | "unknown";
   profile: "science" | "full-state";
   state: "preparing" | "ready" | "failed";
   progress: { phase: string; completed_bytes?: number; total_bytes?: number };
@@ -145,6 +151,15 @@ export async function download(
     calcjob_uuid: artifact.calcjob_uuid,
   });
   await nativeDownload(token, `/runs/${uuid}/artifact/authorize?${query}`);
+}
+
+export async function prepareExport(
+  token: string, uuid: string, executionId: string,
+  profile: "science" | "full-state", selection?: ExportSelection,
+): Promise<ExportStatus> {
+  return api<ExportStatus>(token, `/runs/${uuid}/exports`, {
+    execution_id: executionId, profile, ...selection,
+  });
 }
 
 export async function downloadExport(token: string, exportId: string): Promise<void> {

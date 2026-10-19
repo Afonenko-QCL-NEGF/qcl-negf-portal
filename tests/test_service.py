@@ -25,9 +25,23 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         record("list")
         return []
 
-    def get_export_plan(*args):
+    def get_export_plan(*args, **kwargs):
+        assert kwargs == {"attempt": 2, "calcjob_uuid": "exact-child"}
         record("plan")
         return {"plan": b"frozen bytes", "source": "aiida.input.plan"}
+
+    def selection(*args, **kwargs):
+        assert args == ("run", "execution")
+        assert kwargs == {"attempt": 2, "calcjob_uuid": "exact-child"}
+        record("selection")
+        return {"execution_id": "execution", "attempt": 2,
+                "calcjob_uuid": "exact-child", "status": "failed"}
+
+    def inventory(*args, **kwargs):
+        assert args == ("run", "execution")
+        assert kwargs == {"attempt": 2, "calcjob_uuid": "exact-child"}
+        record("inventory")
+        return []
 
     class Stream(BytesIO):
         def read(self, size):
@@ -79,6 +93,8 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         list_runs=list_runs,
         open_artifact=open_artifact,
         get_export_plan=get_export_plan,
+        get_export_selection=selection,
+        list_execution_artifacts=inventory,
         get_artifact_metadata=metadata,
     )
     monkeypatch.setattr(aiida, "load_profile", load_profile)
@@ -94,7 +110,15 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         with ThreadPoolExecutor(max_workers=4) as clients:
             futures = [clients.submit(actor.list_runs, limit=10) for _ in range(8)]
             assert all(future.result() == [] for future in futures)
-        assert actor.get_export_plan("run", "execution")["plan"] == b"frozen bytes"
+        assert actor.get_export_selection(
+            "run", "execution", attempt=2, calcjob_uuid="exact-child"
+        )["status"] == "failed"
+        assert actor.list_execution_artifacts(
+            "run", "execution", attempt=2, calcjob_uuid="exact-child"
+        ) == []
+        assert actor.get_export_plan(
+            "run", "execution", attempt=2, calcjob_uuid="exact-child"
+        )["plan"] == b"frozen bytes"
         assert actor.get_artifact_metadata(
             "run", "execution", "result", attempt=2, calcjob_uuid="exact-child"
         ) == {"size": 4}
@@ -116,6 +140,8 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
     assert [event[0] for event in events] == [
         "load",
         *(["list"] * 8),
+        "selection",
+        "inventory",
         "plan",
         "metadata",
         "agent_save",

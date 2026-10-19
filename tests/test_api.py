@@ -53,12 +53,18 @@ def service():
                 "attempt": 1, "calcjob_uuid": CODE}
 
     return SimpleNamespace(
+        get_export_selection=lambda run, execution, **kwargs: {
+            "execution_id": execution, "attempt": 1, "calcjob_uuid": CODE, "status": "unknown"},
+        list_execution_artifacts=lambda run, execution, **kwargs: [
+            {"execution_id": "point_1", "path": "result.json", "size": 26,
+             "attempt": 1, "calcjob_uuid": CODE}
+        ] if execution == "point_1" else [],
         get_artifact_metadata=metadata,
         calls=calls,
         list_runs=lambda **kwargs: [record],
         submit_plan=submit,
         get_run=get_run,
-        get_export_plan=lambda run, execution: {
+        get_export_plan=lambda run, execution, **kwargs: {
             "plan": b'{ "frozen": 1.234567890123456789 }\n', "source": "aiida.input.plan",
         },
         get_run_report=lambda uuid: [
@@ -208,20 +214,31 @@ def test_export_request_rejects_missing_execution_and_unrecognized_profile(clien
     assert response.status_code == 422
 
 
-def test_native_export_capability_is_scoped_and_download_resumes(service, monkeypatch):
+@pytest.mark.parametrize("selectors", [{}, {"attempt": None, "calcjob_uuid": None},
+    {"attempt": 1}, {"calcjob_uuid": CODE.upper()}, {"attempt": 1, "calcjob_uuid": CODE}])
+def test_native_export_capability_is_scoped_and_download_resumes(service, monkeypatch, selectors):
     import hashlib
     import time
 
     from qcl_negf_results import export
 
+    resolutions = []
+
+    def selection(uuid, execution, **kwargs):
+        resolutions.append(kwargs)
+        return {"execution_id": execution, "attempt": 1, "calcjob_uuid": CODE, "status": "unknown"}
+
+    service.get_export_selection = selection
     payload = b"complete immutable archive"
     digest = hashlib.sha256(payload).hexdigest()
-    service.list_artifacts = lambda uuid: [
-        {"execution_id": "point_1", "path": "result/native.bin", "size": 4}
+    service.list_execution_artifacts = lambda uuid, execution, **kwargs: [
+        {"execution_id": "point_1", "path": "result/native.bin", "size": 4,
+         "attempt": 1, "calcjob_uuid": CODE}
     ]
 
     @contextmanager
-    def open_artifact(uuid, execution_id, path):
+    def open_artifact(uuid, execution_id, path, *, attempt, calcjob_uuid):
+        assert (attempt, calcjob_uuid) == (1, CODE)
         assert (uuid, execution_id, path) == (RUN, "point_1", "result/native.bin")
         yield BytesIO(b"data")
 
@@ -230,7 +247,7 @@ def test_native_export_capability_is_scoped_and_download_resumes(service, monkey
     def export_snapshot(root, destination, **kwargs):
         assert (root / "native.bin").read_bytes() == b"data"
         assert kwargs["profile"] == "science"
-        assert kwargs["job_status"] == "running"
+        assert kwargs["job_status"] == "unknown"
         kwargs["progress"]({"phase": "compressing", "completed_bytes": 4, "total_bytes": 4})
         (destination / f"{digest}.tar.xz").write_bytes(payload)
         return {
@@ -245,9 +262,13 @@ def test_native_export_capability_is_scoped_and_download_resumes(service, monkey
     settings = Settings(TOKEN, (CODE,), max_download_bytes=10)
     with TestClient(create_app(settings, service), base_url="https://testserver") as client:
         response = client.post(
-            f"/api/v1/runs/{RUN}/exports", headers=AUTH, json={"execution_id": "point_1"}
+            f"/api/v1/runs/{RUN}/exports", headers=AUTH, json={"execution_id": "point_1", **selectors}
         )
         assert response.status_code == 202, response.text
+        assert resolutions == [{"attempt": selectors.get("attempt"),
+                                "calcjob_uuid": CODE if selectors.get("calcjob_uuid") else None}]
+        assert (response.json()["attempt"], response.json()["calcjob_uuid"],
+                response.json()["status"]) == (1, CODE, "unknown")
         identifier = response.json()["export_id"]
         status = f"/api/v1/exports/{identifier}"
         deadline = time.monotonic() + 5
@@ -758,3 +779,46 @@ def test_agent_report_backend_surrogate_detail_is_safe_422(agent_client, agent_s
     response.json()["detail"].encode("utf-8", "strict")
     assert agent_service.report_calls == ["save"]
     assert agent_service.saved_reports == []
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, "1"])
+def test_composite_attempt_is_strict_before_selection(client, service, value):
+    service.get_export_selection = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("invalid request reached producer"))
+    response = client.post(f"/api/v1/runs/{RUN}/exports", headers=AUTH,
+                           json={"execution_id": "point_1", "attempt": value})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("value", [True, 1, "", "bad", CODE[:8]])
+def test_composite_uuid_is_full_string_before_selection(client, service, value):
+    service.get_export_selection = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("invalid request reached producer"))
+    response = client.post(f"/api/v1/runs/{RUN}/exports", headers=AUTH,
+                           json={"execution_id": "point_1", "calcjob_uuid": value})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("error,code,message", [
+    (ValueError, 422, "Attempt and CalcJob UUID select different children"),
+    (LookupError, 404, "Selected attempt is unavailable"),
+    (ValueError, 422, "Selected artifact inventory is invalid or incomplete"),
+])
+def test_composite_selection_errors_before_payload(client, service, error, code, message):
+    def refusing(*args, **kwargs):
+        assert kwargs == {"attempt": 2, "calcjob_uuid": CODE}
+        raise error(message)
+    service.get_export_selection = refusing
+    response = client.post(f"/api/v1/runs/{RUN}/exports", headers=AUTH,
+        json={"execution_id": "point_1", "attempt": 2, "calcjob_uuid": CODE.upper()})
+    assert response.status_code == code
+    assert response.json()["detail"] == message
+
+
+def test_composite_missing_producer_is_503_without_legacy_fallback(client, service):
+    if hasattr(service, "get_export_selection"):
+        del service.get_export_selection
+    service.list_artifacts = lambda *args: (_ for _ in ()).throw(AssertionError("legacy fallback"))
+    response = client.post(f"/api/v1/runs/{RUN}/exports", headers=AUTH,
+                           json={"execution_id": "point_1"})
+    assert response.status_code == 503

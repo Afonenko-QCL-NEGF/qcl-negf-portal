@@ -10,6 +10,7 @@ import {
   api,
   download,
   downloadExport,
+  prepareExport,
   errorMessage,
   isTerminal,
   readableBytes,
@@ -18,6 +19,7 @@ import {
   type AgentReportReceipt,
   type Config,
   type ExportStatus,
+  type ExportSelection,
   type ReportEntry,
   type Resources,
   type Run,
@@ -33,7 +35,9 @@ function State({ run }: { run: Run }) {
   );
 }
 
-function ExportPanel({ token, uuid, executionId }: { token: string; uuid: string; executionId: string }) {
+function ExportPanel({ token, uuid, executionId, attempt, calcjob_uuid }: {
+  token: string; uuid: string; executionId: string;
+} & ExportSelection) {
   const [profile, setProfile] = useState<"science" | "full-state">("science");
   const [status, setStatus] = useState<ExportStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -56,16 +60,15 @@ function ExportPanel({ token, uuid, executionId }: { token: string; uuid: string
     setBusy(true);
     setError("");
     try {
-      setStatus(await api<ExportStatus>(token, `/runs/${uuid}/exports`, {
-        execution_id: executionId, profile,
-      }));
+      setStatus(await prepareExport(token, uuid, executionId, profile, { attempt, calcjob_uuid }));
     } catch (err) { setError(errorMessage(err)); }
     finally { setBusy(false); }
   }
 
   const progress = status?.progress;
   return <div className="export-card">
-    <strong><code>{executionId}</code></strong>
+    <strong><code>{executionId}</code> · attempt {attempt}</strong>
+    <p className="muted">CalcJob <code>{calcjob_uuid}</code></p>
     <div className="export-actions">
       <select aria-label={`Export profile for ${executionId}`} value={profile}
         disabled={busy || status?.state === "preparing"}
@@ -77,6 +80,11 @@ function ExportPanel({ token, uuid, executionId }: { token: string; uuid: string
         {busy ? "Requesting…" : "Prepare archive"}
       </button>
     </div>
+    {status && <dl>
+      <dt>Selected attempt</dt><dd>{status.attempt}</dd>
+      <dt>Selected CalcJob</dt><dd><code>{status.calcjob_uuid}</code></dd>
+      <dt>Recorded scientific status</dt><dd>{status.status}</dd>
+    </dl>}
     {status?.state === "preparing" && <p role="status" className="muted">
       Preparing archive: {progress?.phase.replaceAll("_", " ")}
       {progress?.total_bytes ? ` · ${readableBytes(progress.completed_bytes ?? 0)} / ${readableBytes(progress.total_bytes)}` : ""}
@@ -689,9 +697,10 @@ function App() {
                     {detail.children?.some((child) => child.retrieved_uuid) && (
                       <>
                         <h4>Complete result archives</h4>
-                        <p className="muted">One .tar.xz file for each execution and profile. Arrays retain their native scientific values.</p>
+                        <p className="muted">One .tar.xz file for the selected attempt and profile. Arrays retain their native scientific values.</p>
                         {detail.children.filter((child) => child.retrieved_uuid).map((child) =>
-                          <ExportPanel key={`${detail.uuid}/${child.uuid}`} token={token} uuid={detail.uuid} executionId={child.execution_id} />
+                          <ExportPanel key={`${detail.uuid}/${child.uuid}`} token={token} uuid={detail.uuid}
+                            executionId={child.execution_id} attempt={child.attempt} calcjob_uuid={child.uuid} />
                         )}
                       </>
                     )}

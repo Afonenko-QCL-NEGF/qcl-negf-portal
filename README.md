@@ -13,6 +13,8 @@ The AiiDA plugin accepts ordinary frozen plans. Campaign plans and evidence-gate
 
 The repository contains two modules with one release cycle: `frontend/` builds a static React/TypeScript application, and `src/qcl_negf_api/` provides the authenticated FastAPI gateway. The compiled browser bundle is included in the Python wheel and served from the same origin. There is one service in production; Node.js is a build dependency. The gateway owns authentication and request admission, while the AiiDA plugin owns execution and provenance. A dedicated thread owns AiiDA's profile, event loop and repository handles; HTTP worker threads do not share mutable AiiDA state. The portal has no scheduler, SSH client or execution queue. One preparation worker copies an immutable retrieved repository to temporary storage and asks `qcl-negf-results` to build a verified archive. Artifact selection and validation remain in results and its contracts.
 
+The [actor lifecycle contract](docs/actor-lifecycle.md) defines the accepted target for caller deadlines, mutation outcomes, artifact/export leases and deferred cleanup. Implementation and fault-fixture verification remain separate: a caller deadline is distinct from actual backend completion.
+
 ## Install
 
 Python 3.14 and an initialized AiiDA profile are required. Install a coordinated wheel set containing `qcl-negf-contracts`, `aiida-qcl-negf` and `qcl-negf-api` from the same platform release:
@@ -127,7 +129,7 @@ Export requests return 202 with an `export_id`, preparation `state`, selected `a
 
 Deploy the coordinated AiiDA `get_export_selection` and `list_execution_artifacts` operations before upgrading this consumer, then restart Portal. Missing operations return 503; there is no fallback to all-attempt inventory. The cache is process-local and restart clears old entries and download capabilities. The producer contract is documented in [export-selection.md](https://github.com/Afonenko-QCL-NEGF/qcl-negf-aiida/blob/codex/review-closure-export-selection/docs/export-selection.md).
 
-Failed preparation can be retried by an explicit request; the portal never retries it automatically. During service shutdown, copying and compression cancel at the next progress callback and temporary output is removed. Operations within a validator or compaction phase finish until their next callback; shutdown is cooperative.
+Failed preparation can be retried by an explicit request; the portal never retries it automatically. Shutdown is cooperative: copying and compression notice cancellation at progress callbacks, while validation or compaction may continue until their next callback. The target lifecycle contract requires cleanup after actual writer and download-lease completion, with an explicit `stopping` result when the close response deadline expires. A close timeout leaves cleanup pending and does not establish that the backend or process has stopped.
 
 ## Development and build
 

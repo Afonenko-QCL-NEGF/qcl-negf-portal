@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from jsonschema.exceptions import ValidationError as SchemaValidationError
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -23,6 +24,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from . import __version__
 from .documentation import Documentation
 from .exports import ExportBusy, ExportStorage, ExportStore
+from .model_help import MalformedModelHelp, model_help_view, selectors
 from .service import ActorDeadline, ActorOutcomeUnknown, ActorUnavailable, AiidaService
 from .settings import Settings
 
@@ -381,6 +383,49 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     def run(request: Request, run_uuid: UUID) -> dict:
         return invoke(request, "get_run", str(run_uuid))
 
+    @app.get("/api/v1/runs/{run_uuid}/model-help", dependencies=protected)
+    def model_help(request: Request, run_uuid: str, fragment_id: str,
+                   execution_id: str, point_id: str, attempt: str | None = None,
+                   calcjob_uuid: str | None = None):
+        allowed = {"fragment_id", "execution_id", "point_id", "attempt", "calcjob_uuid"}
+        try:
+            if (set(request.query_params) - allowed or any(
+                    len(request.query_params.getlist(key)) != 1 for key in request.query_params)):
+                raise ValueError("Unexpected model help selectors")
+            selectors(run_uuid, fragment_id, execution_id, point_id, attempt, calcjob_uuid)
+        except ValueError as exc:
+            raise HTTPException(422, "Invalid model help selectors") from exc
+        try:
+            dto = request.app.state.service.get_model_help_input(
+                run_uuid, execution_id, point_id,
+                attempt=int(attempt) if attempt is not None else None,
+                calcjob_uuid=calcjob_uuid)
+        except ActorUnavailable as exc:
+            raise actor_error(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, "Model help context was not found") from exc
+        except ValueError as exc:
+            raise HTTPException(422, "Model help validation was refused") from exc
+        except Exception as exc:
+            raise HTTPException(503, "Model help service is unavailable") from exc
+        if dto == {"error": "selection_conflict"}:
+            raise HTTPException(409, "Model help selection conflicts")
+        try:
+            view = model_help_view(dto)
+            context = view["context"]
+            if (context["run_uuid"] != run_uuid or context["execution_id"] != execution_id
+                    or context["point_id"] != point_id
+                    or (attempt is not None and context["attempt"] != int(attempt))
+                    or (calcjob_uuid is not None and context["calcjob_uuid"] != calcjob_uuid)):
+                raise ValueError("Model help selected context mismatch")
+            return view
+        except MalformedModelHelp as exc:
+            raise HTTPException(503, "Model help service is unavailable") from exc
+        except (ValueError, SchemaValidationError) as exc:
+            raise HTTPException(422, "Model help validation was refused") from exc
+        except Exception as exc:
+            raise HTTPException(503, "Model help service is unavailable") from exc
+
     @app.get("/api/v1/runs/{run_uuid}/report", dependencies=protected)
     def report(request: Request, run_uuid: UUID) -> dict:
         return {"entries": invoke(request, "get_run_report", str(run_uuid))}
@@ -407,14 +452,18 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             raise HTTPException(422, "Agent report requires only a UTF-8 report string") from exc
         if len(raw) > 262144:
             raise HTTPException(422, "Agent report exceeds the 262144-byte limit")
-        return await run_in_threadpool(invoke_agent_report, request, "save_agent_report", str(run_uuid), raw)
+        return await run_in_threadpool(
+            invoke_agent_report, request, "save_agent_report", str(run_uuid), raw
+        )
 
     @app.get("/api/v1/runs/{run_uuid}/agent-reports", dependencies=protected)
     def agent_reports(
         request: Request, run_uuid: UUID,
         limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0),
     ) -> dict:
-        return {"reports": invoke_agent_report(request, "list_agent_reports", str(run_uuid), limit=limit, offset=offset)}
+        return {"reports": invoke_agent_report(
+            request, "list_agent_reports", str(run_uuid), limit=limit, offset=offset
+        )}
 
     @app.get("/api/v1/runs/{run_uuid}/agent-reports/{report_uuid}", dependencies=protected)
     def agent_report_file(request: Request, run_uuid: UUID, report_uuid: UUID) -> Response:
@@ -440,8 +489,11 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
         if (relative.is_absolute() or ".." in relative.parts or "\\" in path
                 or str(relative) != path):
             raise HTTPException(422, "Artifact path must be normalized and relative")
-        entry = invoke(request, "get_artifact_metadata", str(run_uuid), execution_id, path,
-                       attempt=attempt, calcjob_uuid=str(calcjob_uuid) if calcjob_uuid is not None else None)
+        entry = invoke(
+            request, "get_artifact_metadata", str(run_uuid), execution_id, path,
+            attempt=attempt,
+            calcjob_uuid=str(calcjob_uuid) if calcjob_uuid is not None else None,
+        )
         if entry["size"] > settings.max_download_bytes:
             raise HTTPException(
                 413,

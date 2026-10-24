@@ -24,6 +24,7 @@ OPERATIONS = frozenset(
     {
         "list_runs",
         "get_run",
+        "get_model_help_input",
         "get_export_plan",
         "get_export_selection",
         "list_execution_artifacts",

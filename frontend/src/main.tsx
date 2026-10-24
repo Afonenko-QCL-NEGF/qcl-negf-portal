@@ -24,6 +24,7 @@ import {
   type Resources,
   type Run,
 } from "./api";
+import { PublishedReference, RunModelHelp } from "./model-help";
 import "./style.css";
 
 function State({ run }: { run: Run }) {
@@ -385,23 +386,7 @@ function App() {
       </header>
       <main>
         {token && config && (
-          <nav className="documentation panel" aria-label="Документация исходников">
-            {config.documentation?.status === "available" ? (
-              <>
-                <a href={config.documentation.url ?? undefined}>
-                  Документация исходников {config.documentation.source_revision?.slice(0, 8)}
-                </a>
-                <a href={config.documentation.journeys.researcher ?? undefined}>Исследователю</a>
-                <a href={config.documentation.journeys.developer ?? undefined}>Разработчику</a>
-                <a href={`${config.documentation.url}runner/api/public.html#reader-api-routes`}>
-                  Reader API
-                </a>
-                <a href={config.documentation.journeys.operator ?? undefined}>Оператору</a>
-              </>
-            ) : (
-              <span>Документация исходников недоступна</span>
-            )}
-          </nav>
+          <PublishedReference documentation={config.documentation} />
         )}
         {error && (
           <div role="alert" className="error">
@@ -753,6 +738,7 @@ function App() {
                         </pre>
                       </details>
                     )}
+                    <RunModelHelp token={token} run={detail} />
                     <AgentReportsPanel key={detail.uuid} token={token} uuid={detail.uuid} />
                     <h4>Process report</h4>
                     {report.length ? (

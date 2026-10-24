@@ -9,6 +9,7 @@ export interface Run {
   mtime: string;
   results?: Record<string, unknown>;
   children?: ChildRun[];
+  plan_points?: {id: string; execution_id: string; temperature_K: number; voltage_per_period_V: number}[];
 }
 export interface ChildRun extends Run {
   execution_id: string;
@@ -193,4 +194,61 @@ export function readableBytes(size: number): string {
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
   if (size >= 1024 * 1024 * 1024) return `${(size / 1024 / 1024 / 1024).toFixed(1)} GiB`;
   return `${(size / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+export interface ModelHelpSelection {
+  execution_id: string; point_id: string; attempt?: number; calcjob_uuid?: string;
+}
+export interface ModelHelpContext {
+  run_uuid: string; calcjob_uuid: string; execution_id: string; point_id: string;
+  attempt: number; plan_fingerprint: string; scientific_fingerprint: string;
+  configuration_hash: string | null; model_revision: string;
+}
+export interface UnknownModelHelp {
+  format: 'qcl-negf.model-help-view.v1'; context: ModelHelpContext;
+  binding: {status: 'unknown'; reason: 'source_binding_missing'; release_id: string | null;
+    release_manifest_sha256: null; source_revision: null; bundle_sha256: null};
+  fragment: null; inputs: [];
+  input_status: {status: 'unavailable'; reason: 'inventory_unavailable'};
+}
+const helpUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/;
+const helpHash = /^[0-9a-f]{64}(?![\s\S])/;
+const scientificId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\s\S])/;
+export const fragmentIdPattern = /^[a-z][a-z0-9._-]{0,127}(?![\s\S])/;
+export function readUnknownModelHelp(value: unknown): UnknownModelHelp {
+  const v = value as UnknownModelHelp | null;
+  const c = v?.context; const b = v?.binding;
+  if (!v || v.format !== 'qcl-negf.model-help-view.v1' || !c || !b ||
+      !helpUuid.test(c.run_uuid) || !helpUuid.test(c.calcjob_uuid) ||
+      !scientificId.test(c.execution_id) || !scientificId.test(c.point_id) ||
+      !Number.isSafeInteger(c.attempt) || c.attempt < 1 ||
+      !helpHash.test(c.plan_fingerprint) || !helpHash.test(c.scientific_fingerprint) ||
+      !(c.configuration_hash === null || helpHash.test(c.configuration_hash)) ||
+      typeof c.model_revision !== 'string' || !c.model_revision ||
+      b.status !== 'unknown' || b.reason !== 'source_binding_missing' ||
+      !(b.release_id === null || typeof b.release_id === 'string' && b.release_id.length > 0) ||
+      b.source_revision !== null || b.bundle_sha256 !== null || b.release_manifest_sha256 !== null ||
+      v.fragment !== null || !Array.isArray(v.inputs) || v.inputs.length !== 0 ||
+      v.input_status?.status !== 'unavailable' || v.input_status.reason !== 'inventory_unavailable')
+    throw new Error('Неподдерживаемый ответ контекста модели');
+  return v;
+}
+export async function getModelHelp(token: string, runUuid: string, fragmentId: string,
+    selection: ModelHelpSelection): Promise<UnknownModelHelp> {
+  if (!helpUuid.test(runUuid) || !fragmentIdPattern.test(fragmentId) ||
+      !scientificId.test(selection.execution_id) || !scientificId.test(selection.point_id) ||
+      (selection.attempt !== undefined && (!Number.isSafeInteger(selection.attempt) || selection.attempt < 1)) ||
+      (selection.calcjob_uuid !== undefined && !helpUuid.test(selection.calcjob_uuid)))
+    throw new Error('Нужны точные selectors контекста');
+  const query = new URLSearchParams({fragment_id: fragmentId, execution_id: selection.execution_id,
+    point_id: selection.point_id});
+  if (selection.attempt !== undefined) query.set('attempt', String(selection.attempt));
+  if (selection.calcjob_uuid !== undefined) query.set('calcjob_uuid', selection.calcjob_uuid);
+  const view = readUnknownModelHelp(await api<unknown>(token, `/runs/${runUuid}/model-help?${query}`));
+  if (view.context.run_uuid !== runUuid || view.context.execution_id !== selection.execution_id ||
+      view.context.point_id !== selection.point_id ||
+      (selection.attempt !== undefined && view.context.attempt !== selection.attempt) ||
+      (selection.calcjob_uuid !== undefined && view.context.calcjob_uuid !== selection.calcjob_uuid))
+    throw new Error('Ответ относится к другому контексту');
+  return view;
 }

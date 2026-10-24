@@ -452,3 +452,24 @@ footer {
   color: #135e87;
   text-decoration: underline;
 }
+
+.model-help {
+  color-scheme: light;
+  color: #183044;
+  background: #ffffff;
+  border: 1px solid #b5c6d4;
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem 0;
+  overflow-wrap: anywhere;
+}
+.help-content, .help-unknown, .help-reference { background: #ffffff; color: #183044; }
+.help-content label { display: grid; gap: 0.3rem; margin: 0.7rem 0; }
+.help-content input, .help-content select, .model-help select {
+  max-width: 100%; background: #f7fafc; color: #183044; border: 1px solid #7d92a4;
+}
+.help-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.model-help [role="alert"] { color: #8a251e; background: #fff2ef; padding: 0.7rem; }
+.model-help [role="status"], .help-unknown { background: #f0f6fc; padding: 0.7rem; }
+.model-help :focus-visible { outline: 3px solid #176d9a; outline-offset: 3px; }
+.model-help dd { overflow-wrap: anywhere; }

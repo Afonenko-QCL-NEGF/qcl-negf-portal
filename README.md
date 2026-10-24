@@ -41,6 +41,31 @@ An administrator can set `QCL_NEGF_SCRATCH_ROOT` to an absolute normalized path 
 
 Place a TLS reverse proxy in front of the loopback listener. API requests require the bearer token, including read operations and the OpenAPI document. The browser keeps the token in memory only. Native browser downloads use a one-hour HttpOnly cookie capability bound to the exact artifact or archive; it cannot authorize other API operations. Cookies have SameSite=Strict and use Secure over HTTPS. Their URLs never contain the bearer token or the capability. This is a shared trusted-research-group interface: a token grants access to all QCL-NEGF workflows in the configured AiiDA profile, including submission and cancellation. Use separate profiles and service instances when separate access domains are needed.
 
+## Versioned source documentation
+
+Optional source documentation is served publicly on the same origin under
+`/docs/<source_revision>/`. Configure both `QCL_NEGF_DOCS_BUNDLE_DIR` (an absolute
+immutable bundle directory, normally a selected Nix output) and
+`QCL_NEGF_DOCS_BUNDLE_SHA256` (the exact `bundle.json` SHA-256 from the retained
+DOC04 artifact receipt). The source revision comes from the verified manifest.
+The service checks the existing Contracts schema, source graph identities,
+public inventory, payload hashes and fragment identities once at application
+creation, and retains the admitted bytes. It serves only that revision and
+inventory; historical revisions never fall back to the configured bundle.
+Manifest size is limited to 2 MiB; at most 10000 files, 16 MiB per file and
+256 MiB combined; fragments are limited to 256 entries and 32 KiB each.
+Symlinks, private paths and traversal are refused. No source URLs are fetched.
+
+`GET /api/v1/config` includes typed `documentation` availability and exact
+researcher/developer/operator links. Missing or invalid optional documentation
+leaves the API and AiiDA service available. Reserved valid docs requests then
+return 503 with no-store; malformed/unlisted/unknown-version paths return 404
+when applicable. Available GET/HEAD responses use exact media types, SHA-256
+ETags, conditional 304 and immutable versioned caching. Existing CSP and bearer
+requirements for `/api/v1/` remain in force. The UI shows source documentation
+availability; it does not claim those docs describe a selected run or establish
+publication, browser rendering, convergence or scientific acceptance.
+
 ## Resource and data limits
 
 | Environment variable | Default | Meaning |

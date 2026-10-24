@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
+from .documentation import Documentation
 from .exports import ExportBusy, ExportStorage, ExportStore
 from .service import ActorDeadline, ActorOutcomeUnknown, ActorUnavailable, AiidaService
 from .settings import Settings
@@ -140,6 +141,7 @@ def byte_range(request: Request, size: int, etag: str | None = None) -> tuple[in
 def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI:
     """Create the server; inject a service only in tests or an embedding application."""
     settings = settings or Settings.from_environment()
+    documentation = Documentation.load(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -320,6 +322,7 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     @app.get("/api/v1/config", dependencies=protected)
     def configuration() -> dict:
         return {
+            "documentation": documentation.availability.model_dump(),
             "codes": settings.allowed_codes,
             "profile": settings.profile,
             "defaults": resource_defaults,
@@ -559,6 +562,11 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
             request, lambda: request.app.state.exports.open(str(export_id)),
             receipt["bytes"], receipt["filename"], f'"{receipt["sha256"]}"',
         )
+
+    @app.api_route("/docs", methods=["GET", "HEAD"], include_in_schema=False)
+    @app.api_route("/docs/{tail:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    def source_documentation(request: Request) -> Response:
+        return documentation.response(request, request.path_params.get("tail", ""))
 
     static = Path(__file__).parent / "static"
     if static.is_dir():

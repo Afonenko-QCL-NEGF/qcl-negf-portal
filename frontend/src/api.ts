@@ -22,7 +22,16 @@ export interface Resources {
   max_wallclock_seconds: number;
   max_memory_kb: number;
 }
+export interface DocumentationAvailability {
+  status: "available" | "unavailable";
+  reason: "ok" | "not_configured" | "invalid_configuration" | "bundle_missing" | "invalid_bundle";
+  source_revision: string | null;
+  bundle_sha256: string | null;
+  url: string | null;
+  journeys: { researcher: string | null; developer: string | null; operator: string | null };
+}
 export interface Config {
+  documentation?: DocumentationAvailability;
   defaults: Resources;
   profile: string;
   codes: string[];

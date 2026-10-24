@@ -8,6 +8,7 @@ readme = "README.md"
 dependencies = [
   "aiida-qcl-negf==0.2.0",
   "qcl-negf-results==0.2.0",
+  "qcl-negf-contracts[validation]==0.2.0",
   "fastapi>=0.116,<1",
   "uvicorn>=0.35,<1",
 ]

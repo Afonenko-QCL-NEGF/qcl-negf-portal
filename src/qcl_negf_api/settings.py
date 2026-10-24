@@ -24,6 +24,8 @@ class Settings:
     allowed_codes: tuple[str, ...]
     profile: str = "qcl-negf"
     scratch_root: str | None = None
+    docs_bundle_dir: str | None = None
+    docs_bundle_sha256: str | None = None
     max_machines: int = 1
     max_processes_per_machine: int = 1
     max_cores_per_process: int = 64
@@ -132,5 +134,7 @@ class Settings:
             allowed_codes=codes,
             profile=os.environ.get("QCL_NEGF_AIIDA_PROFILE", "qcl-negf"),
             scratch_root=os.environ.get("QCL_NEGF_SCRATCH_ROOT"),
+            docs_bundle_dir=os.environ.get("QCL_NEGF_DOCS_BUNDLE_DIR"),
+            docs_bundle_sha256=os.environ.get("QCL_NEGF_DOCS_BUNDLE_SHA256"),
             **limits,
         )

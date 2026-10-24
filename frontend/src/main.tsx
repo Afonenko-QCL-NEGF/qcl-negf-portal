@@ -384,6 +384,25 @@ function App() {
         </div>
       </header>
       <main>
+        {token && config && (
+          <nav className="documentation panel" aria-label="Документация исходников">
+            {config.documentation?.status === "available" ? (
+              <>
+                <a href={config.documentation.url ?? undefined}>
+                  Документация исходников {config.documentation.source_revision?.slice(0, 8)}
+                </a>
+                <a href={config.documentation.journeys.researcher ?? undefined}>Исследователю</a>
+                <a href={config.documentation.journeys.developer ?? undefined}>Разработчику</a>
+                <a href={`${config.documentation.url}runner/api/public.html#reader-api-routes`}>
+                  Reader API
+                </a>
+                <a href={config.documentation.journeys.operator ?? undefined}>Оператору</a>
+              </>
+            ) : (
+              <span>Документация исходников недоступна</span>
+            )}
+          </nav>
+        )}
         {error && (
           <div role="alert" className="error">
             <span>{error}</span>

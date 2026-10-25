@@ -31,6 +31,8 @@ test('explicit state and component rendering preserves basis, populations and so
  for(const value of ['Saved state populations','state 3: -2','state 7: 9','saved_target_doping_unavailable','effective'])assert.ok(html.includes(value),value);
  assert.doesNotMatch(html,/sum of selected|normalized to 1|<script>/);
  const initial=renderToStaticMarkup(createElement(ui.SavedResultsPanel,{token:'secret',run:{uuid:'run',children:[{uuid:'job',execution_id:'ex',attempt:2}]}}));
+ assert.match(initial,/Select provider explicitly/);assert.match(initial,/Registered retained NFS source/);
+ assert.doesNotMatch(initial,/<option selected="" value="nfs_registered"/);
  assert.match(initial,/Select explicitly/);assert.doesNotMatch(initial,/secret|Bearer|<option selected="" value="ex/);
 });
 

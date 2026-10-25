@@ -52,3 +52,66 @@ def test_saved_routes_auth_exact_selection_no_store():
             json={"execution_id": "ex", "attempt": 2, "calcjob_uuid": JOB, "path": "/private"},
         )
         assert response.status_code == 422
+
+
+def test_nfs_sources_selector_transport_and_safe_errors():
+    calls = []
+
+    class Saved:
+        async def read(self, op, selection, query, disconnect=None):
+            calls.append((op, selection, query))
+            if query.get("source_sha256") == "f" * 64:
+                raise SavedResultError("source_identity_mismatch")
+            return {"selection": selection}
+
+        async def close(self):
+            pass
+
+    with TestClient(
+        create_app(Settings(TOKEN, (CODE,)), SimpleNamespace(), saved_results=Saved())
+    ) as client:
+        base = f"/api/v1/runs/{RUN}/saved-results/"
+        headers = {"Authorization": "Bearer " + TOKEN}
+        exact = dict(execution_id="ex", attempt=2, calcjob_uuid=JOB)
+        assert client.get(base + "sources", params=exact).status_code == 401
+        response = client.get(base + "sources", params=exact, headers=headers)
+        assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+        assert calls[-1][0] == "sources" and calls[-1][2] == {}
+        assert (
+            client.get(
+                base + "sources", params={**exact, "provider": "nfs_registered"}, headers=headers
+            ).status_code
+            == 422
+        )
+        nfs = dict(
+            provider="nfs_registered",
+            source_uuid="44444444-4444-4444-8444-444444444444",
+            source_sha256="a" * 64,
+        )
+        assert (
+            client.get(base + "brief", params={**exact, **nfs}, headers=headers).status_code == 200
+        )
+        assert calls[-1][2] == nfs
+        failed = client.get(
+            base + "brief", params={**exact, **nfs, "source_sha256": "f" * 64}, headers=headers
+        )
+        assert failed.status_code == 409 and failed.headers["cache-control"] == "no-store"
+        assert b"/run/" not in failed.content
+        duplicate = list(exact.items()) + list(nfs.items()) + [("source_uuid", JOB)]
+        assert client.get(base + "brief", params=duplicate, headers=headers).status_code == 422
+        body = {
+            **exact,
+            **nfs,
+            "point_id": "p0",
+            "source_commit_sha256": "b" * 64,
+            "metadata_sha256": "c" * 64,
+            "view_id": "density",
+            "selection": [0],
+        }
+        assert client.post(base + "slice", json=body, headers=headers).status_code == 200
+        for malformed in (
+            {**body, "provider": "aiida_retrieved"},
+            {k: v for k, v in body.items() if k != "source_sha256"},
+            {**body, "path": "/private/secret"},
+        ):
+            assert client.post(base + "slice", json=malformed, headers=headers).status_code == 422

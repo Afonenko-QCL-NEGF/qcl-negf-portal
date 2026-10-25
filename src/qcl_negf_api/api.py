@@ -794,6 +794,7 @@ def create_app(settings: Settings | None = None, service: Any = None,
                 "reason": "Saved result is unavailable for this exact selection"}},
                 status_code=status, headers={"Cache-Control": "no-store"})
 
+    @app.get("/api/v1/runs/{run_uuid}/saved-results/sources", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/brief", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/manifest", dependencies=protected)
     async def saved_metadata(
@@ -801,10 +802,15 @@ def create_app(settings: Settings | None = None, service: Any = None,
         attempt: int | None = Query(None, ge=1), calcjob_uuid: UUID | None = None,
         cursor: str | None = None, point_id: str | None = None,
         source_commit_sha256: str | None = None, metadata_sha256: str | None = None,
+        provider: str | None = None, source_uuid: str | None = None,
+        source_sha256: str | None = None,
     ):
         operation = request.url.path.rsplit("/", 1)[1]
         query_keys = {"execution_id", "attempt", "calcjob_uuid", "cursor", "point_id",
-                      "source_commit_sha256", "metadata_sha256"}
+                      "source_commit_sha256", "metadata_sha256", "provider",
+                      "source_uuid", "source_sha256"}
+        if operation == "sources":
+            query_keys = {"execution_id", "attempt", "calcjob_uuid"}
         if (set(request.query_params) - query_keys or
                 len(request.query_params.multi_items()) != len(set(request.query_params))):
             return JSONResponse({"detail": {"code": "selection_required",
@@ -812,7 +818,8 @@ def create_app(settings: Settings | None = None, service: Any = None,
                 headers={"Cache-Control": "no-store"})
         query = {k: v for k, v in {"cursor": cursor, "point_id": point_id,
             "source_commit_sha256": source_commit_sha256,
-            "metadata_sha256": metadata_sha256}.items()
+            "metadata_sha256": metadata_sha256, "provider": provider,
+            "source_uuid": source_uuid, "source_sha256": source_sha256}.items()
             if v is not None}
         return await saved_call(request, run_uuid, operation, {"execution_id": execution_id,
             "attempt": attempt, "calcjob_uuid": str(calcjob_uuid) if calcjob_uuid else None}, query)
@@ -824,7 +831,11 @@ def create_app(settings: Settings | None = None, service: Any = None,
             payload = _json(await request.body())
             allowed = {"execution_id", "attempt", "calcjob_uuid", "point_id",
                        "source_commit_sha256", "metadata_sha256", "view_id", "selection"}
-            if not isinstance(payload, dict) or set(payload) != allowed:
+            from .saved_nfs import provider as saved_provider
+            if not isinstance(payload, dict):
+                raise SavedResultError("selection_required")
+            source, rest = saved_provider(payload)
+            if set(rest) != allowed:
                 raise SavedResultError("selection_required")
             selection = {k: payload.pop(k) for k in ("execution_id", "attempt", "calcjob_uuid")}
         except SavedResultError:

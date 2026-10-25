@@ -35,6 +35,8 @@ OPERATIONS = CARD_OPERATIONS | frozenset(
         "get_model_help_input",
         "get_export_plan",
         "get_export_selection",
+        "get_saved_sources",
+        "get_saved_source",
         "list_execution_artifacts",
         "submit_plan",
         "get_run_report",
@@ -497,6 +499,12 @@ class AiidaService:
             return _ArtifactReader(self, lease)
         if message.name.startswith("reader_"):
             return getattr(lease.handle, message.name.removeprefix("reader_"))(*message.args)
+        if message.name in {"get_saved_sources", "get_saved_source"}:
+            operation = getattr(self._service, message.name, None)
+            if not callable(operation):
+                from .saved_results import SavedResultError
+                raise SavedResultError("unsupported_contract")
+            return operation(*message.args, **message.kwargs)
         return getattr(self._service, message.name)(*message.args, **message.kwargs)
 
     def _exit(self, lease):

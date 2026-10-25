@@ -527,3 +527,18 @@ footer {
 .saved-results button { margin: .4rem .5rem .4rem 0; }
 
 .saved-results :is(button, select, input, summary):focus-visible { outline: 3px solid #165da8; outline-offset: 2px; }
+
+/* C07 structure controls: fixed light presentation of submitted tuples only. */
+.structure-editor { color-scheme: light; background: #fff; color: #18314b; border: 1px solid #aabed1; border-radius: .5rem; padding: 1rem; }
+.structure-editor fieldset { border: 1px solid #afc0d1; margin-block: 1rem; min-width: 0; }
+.structure-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: .75rem; }
+.structure-fields input { box-sizing: border-box; width: 100%; min-width: 0; }
+.structure-fields input[type="checkbox"] { width: auto; }
+.structure-geometry { background: #f6f9fd; border: 1px solid #becddb; padding: .75rem; margin-block: 1rem; }
+.structure-geometry svg { display: block; width: 100%; max-height: 18rem; background: #fff; color: #19324c; }
+.structure-geometry svg text { fill: #19324c; font-size: 12px; }
+.structure-table { overflow-x: auto; margin-block: 1rem; }
+.structure-table table { width: 100%; border-collapse: collapse; background: #fff; color: #18314b; }
+.structure-table :is(th, td) { border: 1px solid #c3cfdb; padding: .4rem; text-align: left; overflow-wrap: anywhere; }
+.structure-table th { background: #eaf1f8; }
+.structure-table caption { text-align: left; padding-block: .5rem; }

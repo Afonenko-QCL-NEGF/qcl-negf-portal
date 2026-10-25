@@ -78,3 +78,53 @@ injectable synthetic processes/cgroups. They are source fixtures, not evidence o
 native Runner readiness, actual kernel resource enforcement or scientific
 acceptance. Native cgroup/Runner and release validation require their separately
 authorized prepared environment and finite budget.
+
+## C07: слои и явный физический variant
+
+Новый additive Runner `structure_editor` (`qcl-negf.structure-editor.v1`)
+содержит canonical inputs, one-period geometry, полные material tuples и source
+binding каждой execution. Portal проверяет schema/status, finite browser-safe
+scalars, ≤256 layers/interfaces, material label≤256 UTF-8 bytes, projection≤1MiB,
+execution/template/catalog/model SHA и preset bindings. Старый response без поля
+означает capability unavailable; прежние YAML/preview/plan остаются доступны.
+
+Сначала получите preview template без нового variant. В короткой форме выберите
+structure editor и явно загрузите нужную execution/variant. Это копирует canonical
+Runner inputs в отдельный черновик; refresh preview не заменяет введённые значения.
+Смена token/catalog/template/model сбрасывает bound draft. Explicit выбор execution
+заменяет draft; numerical/structure переключение сохраняет оба буфера и отправляет
+ровно выбранный editor. Combined expert variant остаётся в полном YAML. YAML→form
+по-прежнему требует existing explicit reset; original YAML и frozen plan не
+парсятся и не переписываются клиентом.
+
+Форма поддерживает add-as-explicit-copy, remove, reorder, duplicate layer,
+толщину, полный tuple, doped mask, global donor sheet density (m^-2), ionization,
+position origin, reference energy и явные interfaces. «Набор выбранной модели»
+копирует весь tuple из этой bound execution. Изменение x_Al не пересчитывает E_c,
+masses или epsilon; custom edits имеют unknown/research origin. Assigning histories
+относятся к resolving inputs; ссылка на геометрию не доказывает происхождение
+каждого material constant. Это не универсальная material database.
+
+One-period rectangles и таблица показывают submitted piecewise controls с меткой
+«черновик, Runner ещё не проверил». JS складывает только заданные толщины для
+геометрии до position-origin/bias sampling. Interfaces остаются заданным списком,
+не заменяются границами после reorder/thickness edit; внепериодные/неполные значения
+получают предупреждение и требуют явного исправления либо Runner refusal. Doped
+mask вместе с N_sheet не превращается в volume-density profile в UI. Unit/material
+resolution, нормировка donor profile на сетке и effective field при новом period
+остаются у owning Runner/Core. Для точного expert quantity text используйте YAML.
+
+Structure editor сериализует один existing `fields.variant` с
+`comparison_kind:physical_parameter` и шестью whole-leaf controlled paths:
+`physical.layers`, `physical.interfaces`, `physical.donor_sheet_density`,
+`physical.ionization_fraction`, `physical.position_origin`, `physical.reference_energy`.
+Никаких indexed paths, новых HTTP request keys или implicit combined variants.
+Новый ID не должен совпадать с template variant; authoritative collision/scope/
+physical validity проверяет Runner. После любой правки preview/plan confirmation
+снимаются. Только новый validated preview можно передать в существующую отдельную
+форму submit с исходными exact plan bytes/SHA.
+
+Это no-solve structure input editor. Новые quantum levels/wavefunctions, live
+histories, scientific acceptance и installed browser/native usability им не
+доказаны и автоматически не запускаются. Execution, convergence, physical checks,
+discretization и experiment остаются отдельными axes с unknown для preview.

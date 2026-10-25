@@ -510,3 +510,20 @@ footer {
 .configurator :is(button, input, select, textarea, summary):focus-visible { outline: 3px solid #2163c6; outline-offset: 3px; }
 .configurator-preview { background: #fafdff; border: 1px solid #b7c8da; padding: 1rem; margin-block: 1rem; }
 .configurator [role="alert"] { color: #8b1d2d; background: #fff1f2; }
+
+
+/* Saved transport remains explicitly light, including native diagnostic cells. */
+.saved-results { color-scheme: light; color: #183044; background: #fff; border: 1px solid #c9d4df; border-radius: 8px; padding: 1rem; margin: 1.25rem 0; }
+.saved-results label { display: block; margin: .7rem 0; }
+.saved-results select, .saved-results input { color: #183044; background: #fff; border: 1px solid #7b8ea3; max-width: 100%; }
+.saved-results fieldset { background: #f6f9fc; border: 1px solid #b6c7d7; margin: .7rem 0; display: flex; flex-wrap: wrap; gap: .7rem; }
+.saved-results fieldset input { width: 7rem; display: block; }
+.saved-results pre { white-space: pre-wrap; overflow-wrap: anywhere; color: #183044; background: #f5f8fb; max-height: 22rem; overflow: auto; }
+.saved-plot { display: block; background: #fff; width: 100%; max-height: 28rem; }
+.saved-plot text { font-size: 11px; fill: #183044; }
+.saved-table { overflow: auto; max-height: 26rem; margin: .7rem 0; }
+.saved-table th { color: #183044; background: #edf3f8; }
+.saved-results .error { color: #8a1524; background: #fff2f3; padding: .6rem; }
+.saved-results button { margin: .4rem .5rem .4rem 0; }
+
+.saved-results :is(button, select, input, summary):focus-visible { outline: 3px solid #165da8; outline-offset: 2px; }

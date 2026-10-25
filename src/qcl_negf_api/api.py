@@ -28,6 +28,7 @@ from .configurator import Configurator, ConfiguratorError
 from .documentation import Documentation
 from .exports import ExportBusy, ExportStorage, ExportStore
 from .model_help import MalformedModelHelp, model_help_view, selectors
+from .saved_results import SavedResultError, SavedResults
 from .service import ActorDeadline, ActorOutcomeUnknown, ActorUnavailable, AiidaService
 from .settings import Settings
 
@@ -170,7 +171,7 @@ def byte_range(request: Request, size: int, etag: str | None = None) -> tuple[in
 
 
 def create_app(settings: Settings | None = None, service: Any = None,
-               *, configurator: Any = None) -> FastAPI:
+               *, configurator: Any = None, saved_results: Any = None) -> FastAPI:
     """Create the server; inject a service only in tests or an embedding application."""
     settings = settings or Settings.from_environment()
     documentation = Documentation.load(settings)
@@ -184,11 +185,16 @@ def create_app(settings: Settings | None = None, service: Any = None,
             app.state.service = service
         app.state.exports = ExportStore(app.state.service, settings)
         app.state.configurator = configurator
+        app.state.saved_results = (saved_results if saved_results is not None else
+                                   SavedResults(app.state.service, settings))
         try:
             yield
         finally:
             try:
-                await configurator.close()
+                try:
+                    await app.state.saved_results.close()
+                finally:
+                    await configurator.close()
             finally:
                 deadline = time.monotonic() + settings.actor_close_timeout_seconds
                 try:
@@ -774,6 +780,58 @@ def create_app(settings: Settings | None = None, service: Any = None,
     @app.post("/api/v1/runs/{run_uuid}/kill", dependencies=protected)
     def kill(request: Request, run_uuid: UUID) -> dict:
         return invoke(request, "kill_run", str(run_uuid))
+
+    async def saved_call(request: Request, run_uuid: UUID, operation: str, selection: dict,
+                         query: dict) -> JSONResponse:
+        try:
+            result = await request.app.state.saved_results.read(operation,
+                {"run_uuid": str(run_uuid), **selection}, query, request.is_disconnected)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except SavedResultError as exc:
+            status = (409 if exc.code in {"busy", "identity_mismatch"} else
+                      503 if exc.code in {"unavailable_storage", "stopping"} else 422)
+            return JSONResponse({"detail": {"code": exc.code,
+                "reason": "Saved result is unavailable for this exact selection"}},
+                status_code=status, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/runs/{run_uuid}/saved-results/brief", dependencies=protected)
+    @app.get("/api/v1/runs/{run_uuid}/saved-results/manifest", dependencies=protected)
+    async def saved_metadata(
+        request: Request, run_uuid: UUID, execution_id: str | None = None,
+        attempt: int | None = Query(None, ge=1), calcjob_uuid: UUID | None = None,
+        cursor: str | None = None, point_id: str | None = None,
+        source_commit_sha256: str | None = None, metadata_sha256: str | None = None,
+    ):
+        operation = request.url.path.rsplit("/", 1)[1]
+        query_keys = {"execution_id", "attempt", "calcjob_uuid", "cursor", "point_id",
+                      "source_commit_sha256", "metadata_sha256"}
+        if (set(request.query_params) - query_keys or
+                len(request.query_params.multi_items()) != len(set(request.query_params))):
+            return JSONResponse({"detail": {"code": "selection_required",
+                "reason": "Only exact saved provenance selectors are supported"}},422,
+                headers={"Cache-Control": "no-store"})
+        query = {k: v for k, v in {"cursor": cursor, "point_id": point_id,
+            "source_commit_sha256": source_commit_sha256,
+            "metadata_sha256": metadata_sha256}.items()
+            if v is not None}
+        return await saved_call(request, run_uuid, operation, {"execution_id": execution_id,
+            "attempt": attempt, "calcjob_uuid": str(calcjob_uuid) if calcjob_uuid else None}, query)
+
+    @app.post("/api/v1/runs/{run_uuid}/saved-results/slice", dependencies=protected)
+    async def saved_slice(request: Request, run_uuid: UUID):
+        try:
+            from .saved_results import _json
+            payload = _json(await request.body())
+            allowed = {"execution_id", "attempt", "calcjob_uuid", "point_id",
+                       "source_commit_sha256", "metadata_sha256", "view_id", "selection"}
+            if not isinstance(payload, dict) or set(payload) != allowed:
+                raise SavedResultError("selection_required")
+            selection = {k: payload.pop(k) for k in ("execution_id", "attempt", "calcjob_uuid")}
+        except SavedResultError:
+            return JSONResponse({"detail": {"code": "selection_required",
+                "reason": "Use only exact provenance and semantic native selection"}},422,
+                headers={"Cache-Control": "no-store"})
+        return await saved_call(request, run_uuid, "slice", selection, payload)
 
     @app.get("/api/v1/runs/{run_uuid}/artifacts", dependencies=protected)
     def artifacts(request: Request, run_uuid: UUID) -> dict:

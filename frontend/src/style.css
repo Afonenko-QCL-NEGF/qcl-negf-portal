@@ -555,3 +555,10 @@ footer {
 .saved-diagnostics th { background: #edf3f9; }
 .diagnostic-plot { width: 100%; max-height: 25rem; background: #fff; }
 .diagnostic-plot text { fill: #19324b; font-size: 12px; }
+
+.quantum-preview { margin-top: 1.2rem; padding: 1rem; background: #f8fbff; border: 1px solid #b6c8df; border-radius: .5rem; }
+.quantum-preview label { display: block; margin: .7rem 0; color: #18344f; }
+.quantum-preview select { width: 100%; background: #fff; color: #18344f; }
+.quantum-chart { margin: 1rem 0; background: #fff; border: 1px solid #c6d2df; padding: .5rem; }
+.quantum-chart svg { display: block; width: 100%; height: auto; background: #fff; }
+.quantum-result table { background: #fff; color: #18344f; }

@@ -26,6 +26,10 @@ class Settings:
     scratch_root: str | None = None
     docs_bundle_dir: str | None = None
     docs_bundle_sha256: str | None = None
+    configurator_executable: str | None = None
+    configurator_catalog_root: str | None = None
+    configurator_catalog_source_id: str | None = None
+    configurator_cgroup_root: str | None = None
     max_machines: int = 1
     max_processes_per_machine: int = 1
     max_cores_per_process: int = 64
@@ -136,5 +140,9 @@ class Settings:
             scratch_root=os.environ.get("QCL_NEGF_SCRATCH_ROOT"),
             docs_bundle_dir=os.environ.get("QCL_NEGF_DOCS_BUNDLE_DIR"),
             docs_bundle_sha256=os.environ.get("QCL_NEGF_DOCS_BUNDLE_SHA256"),
+            configurator_executable=os.environ.get("QCL_NEGF_CONFIGURATOR_EXECUTABLE"),
+            configurator_catalog_root=os.environ.get("QCL_NEGF_CONFIGURATOR_CATALOG_ROOT"),
+            configurator_catalog_source_id=os.environ.get("QCL_NEGF_CONFIGURATOR_CATALOG_SOURCE_ID"),
+            configurator_cgroup_root=os.environ.get("QCL_NEGF_CONFIGURATOR_CGROUP_ROOT"),
             **limits,
         )

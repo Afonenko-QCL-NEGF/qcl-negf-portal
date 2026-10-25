@@ -24,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
+from .configurator import Configurator, ConfiguratorError
 from .documentation import Documentation
 from .exports import ExportBusy, ExportStorage, ExportStore
 from .model_help import MalformedModelHelp, model_help_view, selectors
@@ -168,10 +169,12 @@ def byte_range(request: Request, size: int, etag: str | None = None) -> tuple[in
     return start, stop, 206
 
 
-def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI:
+def create_app(settings: Settings | None = None, service: Any = None,
+               *, configurator: Any = None) -> FastAPI:
     """Create the server; inject a service only in tests or an embedding application."""
     settings = settings or Settings.from_environment()
     documentation = Documentation.load(settings)
+    configurator = configurator if configurator is not None else Configurator(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -180,15 +183,19 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
         else:
             app.state.service = service
         app.state.exports = ExportStore(app.state.service, settings)
+        app.state.configurator = configurator
         try:
             yield
         finally:
-            deadline = time.monotonic() + settings.actor_close_timeout_seconds
             try:
-                app.state.exports.close(deadline=deadline)
+                await configurator.close()
             finally:
-                if service is None:
-                    app.state.service.close(deadline=deadline)
+                deadline = time.monotonic() + settings.actor_close_timeout_seconds
+                try:
+                    app.state.exports.close(deadline=deadline)
+                finally:
+                    if service is None:
+                        app.state.service.close(deadline=deadline)
 
     app = FastAPI(
         title="QCL-NEGF API",
@@ -590,6 +597,7 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
     def configuration() -> dict:
         return {
             "documentation": documentation.availability.model_dump(),
+            "configurator": configurator.availability(),
             "codes": settings.allowed_codes,
             "profile": settings.profile,
             "defaults": resource_defaults,
@@ -607,6 +615,29 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
                 "ttl_seconds": settings.export_ttl_seconds,
             },
         }
+
+    async def configurator_call(request: Request, *, preview: bool) -> JSONResponse:
+        try:
+            if preview:
+                result = await configurator.preview(await request.body(), request.is_disconnected)
+            else:
+                result = await configurator.catalog(request.is_disconnected)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except ConfiguratorError as exc:
+            status = (409 if exc.code == "busy" else 503 if exc.code in
+                      {"unavailable", "cleanup_unconfirmed", "runner_failed"} else
+                      504 if exc.code == "timeout" else 422)
+            return JSONResponse({"status": "error", "error": {
+                "code": exc.code, "path": "", "message": "Configurator request refused"}},
+                status_code=status, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/configurator/catalog", dependencies=protected)
+    async def configurator_catalog(request: Request):
+        return await configurator_call(request, preview=False)
+
+    @app.post("/api/v1/configurator/preview", dependencies=protected)
+    async def configurator_preview(request: Request):
+        return await configurator_call(request, preview=True)
 
     @app.get("/api/v1/runs", dependencies=protected)
     def runs(

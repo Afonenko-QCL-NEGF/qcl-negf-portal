@@ -214,3 +214,29 @@ The component CI checks the frontend on trusted pushes to `main` and manual disp
 - [qcl-negf-platform](https://github.com/Afonenko-QCL-NEGF/qcl-negf-platform): NixOS services and integration releases.
 
 Released under the MIT license. See [LICENSE](LICENSE).
+
+## Retained plan dependencies (read only)
+
+Run detail consumes optional `plan_structure` from the existing authenticated
+`GET /api/v1/runs/{uuid}`. It displays the exact run UUID/fingerprint, inclusion
+tree (shared execution membership allowed), execution/definition/variant and
+operation, and only explicit `predecessor → point` edges with branch, order,
+initialization, temperature in K and voltage per period in V. Independent
+points have no edge. Point tables show at most 100 rows per execution/page,
+with totals and local previous/next controls; all rows remain reachable.
+
+Observed attempts retain separate UUID/attempt/process/exit entries and local
+anchors. The flattened descendant inventory is not a set of direct CALL links.
+A planned execution without a child says `attempt не создан`; point execution
+and scientific assessments stay unknown without exact retained evidence.
+Selected execution results are never assigned to all attempts or points.
+Missing/unsupported/malformed structure shows an availability reason while
+ordinary detail, observed attempts, results and help remain usable. Run UUID
+keys reset local page state and the existing refresh sequence rejects stale
+requests. Presentation uses React escaping and the fixed light theme.
+
+This source slice adds no submission, resolver, actor method, HTTP endpoint,
+workflow editor, physics or result derivation. Stage/variant forms, research
+card association, saved plots, resource admission and native browser acceptance
+remain separate work. Source fixtures and server rendering do not establish
+browser keyboard/theme/async-race acceptance or production activation.

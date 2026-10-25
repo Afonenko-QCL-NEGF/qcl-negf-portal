@@ -1,3 +1,4 @@
+import type { PlanStructure } from "./run-structure-data.ts";
 export interface Run {
   uuid: string;
   pk: number;
@@ -9,6 +10,8 @@ export interface Run {
   mtime: string;
   results?: Record<string, unknown>;
   children?: ChildRun[];
+  plan_fingerprint?: string;
+  plan_structure?: PlanStructure;
   plan_points?: {id: string; execution_id: string; temperature_K: number; voltage_per_period_V: number}[];
 }
 export interface ChildRun extends Run {

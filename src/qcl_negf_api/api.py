@@ -1,6 +1,7 @@
 """Bounded HTTP adapter. AiiDA is the sole owner of execution state."""
 
 import hmac
+import json
 import logging
 import secrets
 import time
@@ -18,6 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError
+from qcl_negf_contracts.research_cards import validate_research_card
 from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -103,6 +105,32 @@ class Submission(BaseModel):
 class AgentReportSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     report: StrictStr
+
+
+class CardCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    request_uuid: StrictStr
+    card: StrictStr
+
+
+class CardEdit(CardCreate):
+    base_version_uuid: StrictStr
+
+
+class CardRun(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    request_uuid: StrictStr
+    card_version_uuid: StrictStr
+    run_uuid: StrictStr
+    plan_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CardAnalysis(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    request_uuid: StrictStr
+    card_version_uuid: StrictStr
+    anchor_run_uuid: StrictStr
+    report_uuid: StrictStr
 
 
 class ExportRequest(BaseModel):
@@ -312,6 +340,243 @@ def create_app(settings: Settings | None = None, service: Any = None) -> FastAPI
                 # Keep report refusals safe without changing existing API errors.
                 raise HTTPException(422, "Agent report validation was refused") from exc
             raise
+
+    def card_uuid(value: str) -> str:
+        try:
+            if str(UUID(value)) != value:
+                raise ValueError()
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise HTTPException(422, "Canonical UUID required") from exc
+        return value
+
+    def card_invoke(request: Request, method: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            result = invoke(request, method, *args, **kwargs)
+        except HTTPException as exc:
+            if exc.status_code == 422 and not (exc.headers or {}).get("X-QCL-Operation-ID"):
+                raise HTTPException(422, "Research-card validation was refused") from exc
+            raise
+        if not isinstance(result, bytes):
+            if (
+                len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+                > 1048576
+            ):
+                raise HTTPException(422, "Research-card response exceeds 1 MiB")
+        return result
+
+    async def card_body(request: Request, model):
+        def unique(pairs):
+            data = {}
+            for key, value in pairs:
+                if key in data:
+                    raise ValueError("Duplicate field")
+                data[key] = value
+            return data
+
+        try:
+            payload = json.loads(
+                (await request.body()).decode("utf-8", "strict"), object_pairs_hook=unique
+            )
+            value = model.model_validate(payload)
+            for key, item in value.model_dump().items():
+                if key.endswith("_uuid"):
+                    card_uuid(item)
+            if hasattr(value, "plan_fingerprint"):
+                fingerprint = value.plan_fingerprint
+                if len(fingerprint) != 64 or any(c not in "0123456789abcdef" for c in fingerprint):
+                    raise ValueError("Invalid fingerprint")
+            if hasattr(value, "card"):
+                validate_research_card(value.card.encode("utf-8", "strict"))
+            return value
+        except (ValueError, UnicodeError, RecursionError, HTTPException) as exc:
+            raise HTTPException(422, "Research-card envelope or content was refused") from exc
+
+    def card_page(request: Request, limit: int, offset: int):
+        for key, number in (("limit", limit), ("offset", offset)):
+            text = request.query_params.get(key, str(number))
+            if (
+                len(request.query_params.getlist(key)) > 1
+                or not text.isascii()
+                or not text.isdigit()
+            ):
+                raise HTTPException(422, "Research-card pagination requires integers")
+
+    def card_mutation(result):
+        if result.get("status") == "rejected":
+            reason = result.get("reason")
+            codes = {
+                "not_found": 404,
+                "version_conflict": 409,
+                "request_conflict": 409,
+                "invalid_binding": 422,
+                "unsupported_plan": 422,
+            }
+            if reason not in codes:
+                raise HTTPException(503, "Research-card receipt is unavailable")
+            # Fixed returned DTO: known refusal, no actor unknown-effect claim.
+            return JSONResponse(result, status_code=codes[reason])
+        if result.get("status") not in ("stored", "replayed"):
+            raise HTTPException(503, "Research-card receipt is unavailable")
+        return JSONResponse(result, status_code=201 if result["status"] == "stored" else 200)
+
+    @app.post("/api/v1/research-cards", dependencies=protected)
+    async def create_card(request: Request):
+        body = await card_body(request, CardCreate)
+        return card_mutation(
+            await run_in_threadpool(
+                card_invoke,
+                request,
+                "create_research_card",
+                body.request_uuid,
+                body.card.encode("utf-8"),
+            )
+        )
+
+    @app.get("/api/v1/research-cards", dependencies=protected)
+    def cards(request: Request, limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
+        card_page(request, limit, offset)
+        return {"cards": card_invoke(request, "list_research_cards", limit=limit, offset=offset)}
+
+    @app.get("/api/v1/research-cards/{identifier}", dependencies=protected)
+    def card(request: Request, identifier: str):
+        return card_invoke(request, "get_research_card", card_uuid(identifier))
+
+    @app.post("/api/v1/research-cards/{identifier}/versions", dependencies=protected)
+    async def edit_card(request: Request, identifier: str):
+        card_uuid(identifier)
+        body = await card_body(request, CardEdit)
+        return card_mutation(
+            await run_in_threadpool(
+                card_invoke,
+                request,
+                "edit_research_card",
+                identifier,
+                body.request_uuid,
+                body.base_version_uuid,
+                body.card.encode("utf-8"),
+            )
+        )
+
+    @app.get("/api/v1/research-cards/{identifier}/versions", dependencies=protected)
+    def card_versions(
+        request: Request,
+        identifier: str,
+        limit: int = Query(20, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+    ):
+        card_page(request, limit, offset)
+        return {
+            "versions": card_invoke(
+                request,
+                "list_research_card_versions",
+                card_uuid(identifier),
+                limit=limit,
+                offset=offset,
+            )
+        }
+
+    @app.get("/api/v1/research-cards/{identifier}/versions/{version_uuid}", dependencies=protected)
+    def card_version(request: Request, identifier: str, version_uuid: str):
+        return card_invoke(
+            request, "read_research_card_version", card_uuid(identifier), card_uuid(version_uuid)
+        )
+
+    @app.get(
+        "/api/v1/research-cards/{identifier}/versions/{version_uuid}/file", dependencies=protected
+    )
+    def card_file(request: Request, identifier: str, version_uuid: str):
+        raw = card_invoke(
+            request,
+            "read_research_card_version",
+            card_uuid(identifier),
+            card_uuid(version_uuid),
+            raw=True,
+        )
+        if not isinstance(raw, bytes) or len(raw) > 65536:
+            raise HTTPException(422, "Research-card file exceeds its byte limit")
+        return Response(
+            raw,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": 'attachment; filename="research-card.json"',
+                "Content-Length": str(len(raw)),
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.post("/api/v1/research-cards/{identifier}/runs", dependencies=protected)
+    async def attach_card_run(request: Request, identifier: str):
+        card_uuid(identifier)
+        body = await card_body(request, CardRun)
+        return card_mutation(
+            await run_in_threadpool(
+                card_invoke,
+                request,
+                "attach_research_card_run",
+                identifier,
+                body.request_uuid,
+                body.card_version_uuid,
+                body.run_uuid,
+                body.plan_fingerprint,
+            )
+        )
+
+    @app.get("/api/v1/research-cards/{identifier}/runs", dependencies=protected)
+    def card_runs(
+        request: Request,
+        identifier: str,
+        limit: int = Query(20, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+    ):
+        card_page(request, limit, offset)
+        return {
+            "runs": card_invoke(
+                request,
+                "list_research_card_runs",
+                card_uuid(identifier),
+                limit=limit,
+                offset=offset,
+            )
+        }
+
+    @app.post("/api/v1/research-cards/{identifier}/analyses", dependencies=protected)
+    async def attach_card_analysis(request: Request, identifier: str):
+        card_uuid(identifier)
+        body = await card_body(request, CardAnalysis)
+        return card_mutation(
+            await run_in_threadpool(
+                card_invoke,
+                request,
+                "attach_research_card_report",
+                identifier,
+                body.request_uuid,
+                body.card_version_uuid,
+                body.anchor_run_uuid,
+                body.report_uuid,
+            )
+        )
+
+    @app.get("/api/v1/research-cards/{identifier}/analyses", dependencies=protected)
+    def card_analyses(
+        request: Request,
+        identifier: str,
+        limit: int = Query(20, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+    ):
+        card_page(request, limit, offset)
+        return {
+            "analyses": card_invoke(
+                request,
+                "list_research_card_reports",
+                card_uuid(identifier),
+                limit=limit,
+                offset=offset,
+            )
+        }
+
+    @app.get("/api/v1/research-card-requests/{request_uuid}", dependencies=protected)
+    def card_request(request: Request, request_uuid: str):
+        return card_invoke(request, "get_research_card_request", card_uuid(request_uuid))
 
     @app.get("/healthz")
     def health() -> dict:

@@ -129,6 +129,20 @@ export function describeDetail(value: unknown): string {
   return "The request was rejected.";
 }
 
+export class ApiError extends Error {
+  operationId: string | null;
+  outcome: string | null;
+  unresolvedOperationId: string | null;
+  status: number;
+  constructor(message: string, headers: Headers, status = 0) {
+    super(message);
+    this.status = status;
+    this.operationId = headers.get("X-QCL-Operation-ID");
+    this.outcome = headers.get("X-QCL-Operation-Outcome");
+    this.unresolvedOperationId = headers.get("X-QCL-Unresolved-Operation-ID");
+  }
+}
+
 export async function api<T>(
   token: string,
   path: string,
@@ -145,8 +159,9 @@ export async function api<T>(
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(
-      payload ? describeDetail(payload.detail) : `HTTP ${response.status}`,
+    throw new ApiError(
+      payload ? describeDetail(payload.detail ?? payload.reason) : `HTTP ${response.status}`,
+      response.headers, response.status,
     );
   }
   return response.json() as Promise<T>;
@@ -254,4 +269,56 @@ export async function getModelHelp(token: string, runUuid: string, fragmentId: s
       (selection.calcjob_uuid !== undefined && view.context.calcjob_uuid !== selection.calcjob_uuid))
     throw new Error('Ответ относится к другому контексту');
   return view;
+}
+
+/** Small immutable card file only. No result arrays or capability credentials. */
+export async function downloadResearchCard(token: string, card: string, version: string): Promise<void> {
+  if (!helpUuid.test(card) || !helpUuid.test(version)) throw new Error("Canonical UUID required");
+  const response = await fetch(`/api/v1/research-cards/${card}/versions/${version}/file`, {
+    headers: {Authorization: `Bearer ${token}`}, cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const raw = await response.arrayBuffer();
+  if (raw.byteLength > 65536) throw new Error('Research card exceeds byte limit');
+  const address = URL.createObjectURL(new Blob([raw], {type: 'application/json'}));
+  try {
+    const link = document.createElement('a'); link.href = address;
+    link.download = 'research-card.json'; link.click();
+  } finally { URL.revokeObjectURL(address); }
+}
+
+
+/** Both run-list and research-card navigation invalidate the same pending reads. */
+export function selectWorkflowRun(
+  target: string, selected: {current: string | null}, refreshSequence: {current: number},
+  clear: () => void, select: (uuid: string) => void,
+): void {
+  if (target === selected.current) return;
+  refreshSequence.current += 1;
+  selected.current = target;
+  clear();
+  select(target);
+}
+
+/** Existing workflow reads, with one admission predicate for success and error. */
+export async function refreshWorkflowView(
+  token: string, selected: string | null, offset: number, current: () => boolean,
+  view: {runs: (value: Run[]) => void; detail: (value: Run) => void;
+    report: (value: ReportEntry[]) => void; artifacts: (value: Artifact[]) => void;
+    error: (value: string) => void},
+): Promise<void> {
+  try {
+    const page = await api<{runs: Run[]}>(token, `/runs?limit=25&offset=${offset}`);
+    if (!current()) return;
+    view.runs(page.runs);
+    if (selected) {
+      const [run, logs, files] = await Promise.all([
+        api<Run>(token, `/runs/${selected}`),
+        api<{entries: ReportEntry[]}>(token, `/runs/${selected}/report`),
+        api<{artifacts: Artifact[]}>(token, `/runs/${selected}/artifacts`),
+      ]);
+      if (!current()) return;
+      view.detail(run); view.report(logs.entries); view.artifacts(files.artifacts);
+    }
+  } catch (err) { if (current()) view.error(errorMessage(err)); }
 }

@@ -37,6 +37,8 @@ OPERATIONS = CARD_OPERATIONS | frozenset(
         "get_export_selection",
         "get_saved_sources",
         "get_saved_source",
+        "get_live_history_source",
+        "get_performance_source",
         "list_execution_artifacts",
         "submit_plan",
         "get_run_report",
@@ -499,7 +501,7 @@ class AiidaService:
             return _ArtifactReader(self, lease)
         if message.name.startswith("reader_"):
             return getattr(lease.handle, message.name.removeprefix("reader_"))(*message.args)
-        if message.name in {"get_saved_sources", "get_saved_source"}:
+        if message.name in {"get_saved_sources", "get_saved_source", "get_live_history_source", "get_performance_source"}:
             operation = getattr(self._service, message.name, None)
             if not callable(operation):
                 from .saved_results import SavedResultError

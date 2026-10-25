@@ -104,6 +104,11 @@ The output directory for `verdi node repo dump` must not exist. Choose a differe
 
 ## HTTP API
 
+Active closed-prefix history and exact retained execution performance are
+documented in [live-performance.md](docs/live-performance.md). These optional
+read-only views preserve coverage gaps and unknown measurements independently
+of scientific acceptance.
+
 All `/api/v1/` operations require `Authorization: Bearer TOKEN`, except GET/HEAD of an exact download previously authorized by its short-lived cookie. The authenticated OpenAPI schema is at `/api/v1/openapi.json`.
 
 | Method | Path | Operation |

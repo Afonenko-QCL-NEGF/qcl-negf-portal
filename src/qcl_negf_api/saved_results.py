@@ -40,6 +40,7 @@ ERRORS = {
     "corrupt_result",
     "busy",
     "stopping",
+    "source_changed",
 }
 
 
@@ -343,6 +344,10 @@ class SavedResults:
 
         check()
         from .saved_nfs import catalogue, perform, provider
+
+        if operation in {"live-source", "live-history", "performance"}:
+            from .live_nfs import perform as live_perform
+            return live_perform(self, operation, selection, query, cancelled, deadline, check)
 
         if operation == "sources":
             if query:
@@ -792,6 +797,9 @@ def _worker(operation, request, root, cancelled, deadline):
 
 
 def _read_request(request, spool):
+    if request.get("operation") in {"live-source", "live-history", "performance"}:
+        from .live_nfs import read_request
+        return read_request(request, spool)
     from qcl_negf_results.saved_views import describe_saved_views, read_saved_view
 
     if "data_root" in request or "provider_source" in request:
@@ -833,9 +841,11 @@ def _main():
     try:
         resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
         resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (RESPONSE, RESPONSE))
         os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
         request = _json(Path(sys.argv[1]).read_bytes())
+        # JSON remains capped at 2 MiB; only live selected leaves need 64 MiB.
+        file_limit = OWNER if request.get("operation") == "live-history" else RESPONSE
+        resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit, file_limit))
         result = _read_request(request, Path(sys.argv[1]).parent)
         sys.stdout.buffer.write(_bytes(result))
     except Exception as exc:

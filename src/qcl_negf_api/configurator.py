@@ -9,7 +9,10 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
+import stat
 import sys
+import tempfile
 import time
 import uuid
 
@@ -221,7 +224,8 @@ async def _shielded(task):
 
 class Configurator:
     def __init__(self, settings, *, group=None, spawn=None, killpg=None,
-                 wall_seconds=60.0, cleanup_seconds=5.0):
+                 wall_seconds=60.0, cleanup_seconds=5.0, quantum_binding=None,
+                 memory_admission=None, quantum_decoder=None):
         self.settings = settings
         self.group = group
         self.spawn = spawn or asyncio.create_subprocess_exec
@@ -234,6 +238,26 @@ class Configurator:
         self.active = None
         self.pending_cleanup = None
         self._injected_group = group is not None
+        self.memory_snapshot = None
+        from .quantum_preview import runtime_context, memory_admission as admit, decode_quantum_response
+        self.quantum_binding = quantum_binding or (lambda: runtime_context(settings))
+        self.memory_admission = memory_admission or (lambda: admit(settings.configurator_cgroup_root))
+        self.quantum_decoder = quantum_decoder or decode_quantum_response
+
+    def quantum_availability(self):
+        try:
+            if not self.availability()['available']:
+                raise ConfiguratorError('unavailable')
+            context = self.quantum_binding()
+            return {'available': True, 'reason': None, 'runner_source_id': context['runner_source_id'],
+                    'core_source_id': context['core_source_id'], 'policy_id': 'quantum-preview-reference-v1',
+                    'memory_admission': 'at_request', 'execution_seconds': 180}
+        except ConfiguratorError:
+            return {'available': False, 'reason': 'runtime_binding_unavailable'}
+
+    async def quantum(self, raw, disconnect=None, *, deadline=None):
+        return await self._run(raw, disconnect, quantum=True,
+                               deadline=min(time.monotonic()+180, deadline) if deadline is not None else time.monotonic()+180)
 
     def availability(self):
         source = self.settings.configurator_catalog_source_id
@@ -282,7 +306,9 @@ class Configurator:
             except (asyncio.CancelledError, ConfiguratorError):
                 pass
 
-    async def _run(self, raw, disconnect):
+    async def _run(self, raw, disconnect, *, quantum=False, deadline=None):
+        if quantum and (deadline is None or time.monotonic()>=deadline):
+            raise ConfiguratorError('timeout')
         if not self.availability()['available']:
             raise ConfiguratorError('unavailable')
         if self.busy:
@@ -291,11 +317,12 @@ class Configurator:
         self.busy = True
         self.active = asyncio.current_task()
         leaf, process, spawn_task = None, None, None
+        output_directory = None
         readers, ancillary = [], []
         overflow = asyncio.Event()
         stdout = bytearray()
-        stdout_limit = CATALOG_BYTES if raw is None else STDOUT_BYTES
-        deadline = time.monotonic() + self.wall_seconds
+        stdout_limit = 2*1024*1024 if quantum else CATALOG_BYTES if raw is None else STDOUT_BYTES
+        deadline = deadline if quantum else time.monotonic() + self.wall_seconds
 
         async def read(stream, limit, capture=False):
             seen = 0
@@ -360,6 +387,20 @@ class Configurator:
                 raise OSError('cleanup unconfirmed')
 
         try:
+            if quantum:
+                from .quantum_preview import decode_quantum_request, RECORD, canonical
+                if time.monotonic()>=deadline:
+                    raise ConfiguratorError('timeout')
+                context = self.quantum_binding()
+                if time.monotonic()>=deadline:
+                    raise ConfiguratorError('timeout')
+                request = decode_quantum_request(raw, context)
+                if time.monotonic()>=deadline:
+                    raise ConfiguratorError('timeout')
+                admitted_at = time.monotonic()
+                self.memory_snapshot = self.memory_admission()
+                if time.monotonic() >= deadline:
+                    raise ConfiguratorError('timeout')
             try:
                 leaf = self.group.create()
             except (OSError, ValueError) as exc:
@@ -369,14 +410,29 @@ class Configurator:
                     self.settings.configurator_catalog_source_id]
             if raw is None:
                 argv.append('--catalog')
+            environment = dict(ENV)
+            if quantum:
+                output_directory = tempfile.mkdtemp(prefix='qcl-quantum-')
+                output_path = str(Path(output_directory)/'preview.json')
+                argv = [self.settings.configurator_executable, 'quantum-preview', '--runner-source-id',
+                        context['runner_source_id'], '--core-source-id', context['core_source_id'],
+                        '--output', output_path]
+                environment.update(QCL_NEGF_QUANTUM_RUNTIME_CONTEXT=canonical(context).decode('ascii'),
+                    QCL_NEGF_QUANTUM_RUNTIME_CONTEXT_SHA256=context['context_sha256'],
+                    QCL_NEGF_QUANTUM_RUNTIME_RELEASE_FILE=RECORD,
+                    QCL_NEGF_RELEASE_ID=context['release_id'], QCL_NEGF_SOLVER_EXECUTABLE=context['solver_executable'])
             launcher = str(Path(__file__).with_name('configurator_exec.py'))
             disconnected = asyncio.create_task(watch_disconnect())
             ancillary.append(disconnected)
+            if quantum and time.monotonic()>=deadline:
+                raise ConfiguratorError('timeout')
+            if quantum and time.monotonic()-admitted_at>5:
+                raise ConfiguratorError('unavailable')
             spawn_task = asyncio.create_task(self.spawn(
                 sys.executable, '-I', launcher, leaf, *argv,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE, start_new_session=True, close_fds=True,
-                env=dict(ENV)))
+                env=environment))
             # asyncio.wait never cancels the spawn task: cleanup retains its
             # eventual handle even if cancellation/disconnect wins this race.
             started, _ = await asyncio.wait([spawn_task, disconnected],
@@ -415,6 +471,21 @@ class Configurator:
             await finished
             if process.returncode not in (0, 2):
                 raise ConfiguratorError('runner_failed')
+            if quantum:
+                self.quantum_decoder(bytes(stdout), request, context)
+                if process.returncode != 0:
+                    raise ConfiguratorError('runner_failed')
+                decoded = _json(bytes(stdout))
+                if decoded.get('identity', {}).get('request_sha256') != hashlib.sha256(raw).hexdigest():
+                    raise ConfiguratorError('invalid_response')
+                descriptor=os.open(output_path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+                with os.fdopen(descriptor,'rb') as stream:
+                    info=os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_size>2*1024*1024 or stream.read(2*1024*1024+1)!=bytes(stdout):
+                        raise ConfiguratorError('invalid_response')
+                if time.monotonic()>=deadline:
+                    raise ConfiguratorError('timeout')
+                return bytes(stdout)
             result = decode_response(bytes(stdout), self.settings.configurator_catalog_source_id,
                                      self.settings.max_body_bytes - 1024, raw is None)
             if process.returncode != 0:
@@ -444,6 +515,12 @@ class Configurator:
                 await _shielded(asyncio.create_task(_settle(ancillary)))
             self.active = None
             if clean:
+                if output_directory is not None:
+                    try:
+                        shutil.rmtree(output_directory)
+                    except OSError as error:
+                        self.poisoned = True
+                        raise ConfiguratorError('cleanup_unconfirmed') from error
                 self.busy = False
             else:
                 self.poisoned = True

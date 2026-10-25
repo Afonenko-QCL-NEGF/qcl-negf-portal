@@ -2,6 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import {api, errorMessage} from './api.ts';
 import {PreviewSession, makeNumericalVariant, makeRequest, readCatalog, readPreview, verifyPlan} from './configurator-data.ts';
 import {StructureEditor} from './structure-editor.tsx';
+import {QuantumPreview} from './quantum-preview.tsx';
 import {StructureDraftStore,activeVariant,draftToInputs,makeStructureVariant,readStructureEditor} from './structure-editor-data.ts';
 import type {Catalog, CatalogTemplate, FormFields, PlanSelection, Preview} from './configurator-data.ts';
 
@@ -159,6 +160,7 @@ export function Configurator({token,context,availability,onPlan}:{token:string;c
       <div className="configurator-actions"><button type="button" className="primary" disabled={busy||loading||(mode==='yaml'&&!yaml)} onClick={()=>void showPreview()}>{busy?'Runner строит preview…':'Показать план (без запуска)'}</button></div>
       {preview&&<>
         <ConfiguratorPreview preview={preview}/>
+        <QuantumPreview token={token} plan={preview.plan} sha256={preview.plan_sha256} parentContext={context}/>
         {mode==='form'&&<button type="button" onClick={()=>{setYaml(preview.draft_yaml);invalidate();setMode('yaml');}}>Продолжить в semantic YAML Runner</button>}
         <button type="button" onClick={()=>exportText(preview.plan,'frozen-plan.json','application/json')}>Скачать exact frozen plan</button>
         <label><input type="checkbox" checked={reviewed} onChange={e=>{setReviewed(e.target.checked);if(!e.target.checked)onPlan(null);}}/> Проверены scientific inputs, variant scope и выбранный Code / ресурсы / label ниже.</label>

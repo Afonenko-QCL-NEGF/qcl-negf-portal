@@ -357,3 +357,34 @@ export async function refreshWorkflowView(
     }
   } catch (err) { if (current()) view.error(errorMessage(err)); }
 }
+
+/** Quantum-only end-to-end deadline; exact JSON bytes retained for download. */
+export async function quantumPreviewRaw(token:string,body:string,signal:AbortSignal):Promise<string>{
+  const controller=new AbortController();
+  const cancel=()=>controller.abort();
+  if(signal.aborted)cancel();else signal.addEventListener('abort',cancel,{once:true});
+  const timer=setTimeout(cancel,195000);
+  try{
+    const response=await fetch('/api/v1/configurator/quantum-preview',{method:'POST',
+      headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body,
+      cache:'no-store',signal:controller.signal});
+    if(!response.body)throw new Error('Quantum response body unavailable');
+    const reader=response.body.getReader(),chunks:Uint8Array[]=[];let bytes=0;
+    while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;
+      if(bytes>2097152){controller.abort();throw new Error('Quantum response exceeds 2 MiB');}chunks.push(value);}
+    const raw=new Uint8Array(bytes);let offset=0;for(const chunk of chunks){raw.set(chunk,offset);offset+=chunk.byteLength;}
+    const text=new TextDecoder('utf-8',{fatal:true}).decode(raw);
+    if(!response.ok){
+      let detail=`Quantum preview: HTTP ${response.status}`;
+      try{const error:unknown=JSON.parse(text);
+        if(error&&typeof error==='object'&&'reason' in error&&typeof error.reason==='string'&&/^[a-z][a-z0-9_]{0,127}$/.test(error.reason)&&'plan_changed' in error&&error.plan_changed===false){
+          const actual='actual' in error&&typeof error.actual==='number'&&Number.isFinite(error.actual)?error.actual:'unknown';
+          const allowed='allowed' in error&&typeof error.allowed==='number'&&Number.isFinite(error.allowed)?error.allowed:'unknown';
+          detail=`${error.reason}; actual=${actual}; limit=${allowed}; frozen plan unchanged`;
+        }
+      }catch{/* Invalid error JSON stays a bounded HTTP refusal. */}
+      throw new ApiError(detail,response.headers,response.status);
+    }
+    return text;
+  }finally{clearTimeout(timer);signal.removeEventListener('abort',cancel);}
+}

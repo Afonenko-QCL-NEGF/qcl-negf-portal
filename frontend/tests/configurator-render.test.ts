@@ -18,9 +18,13 @@ const rewrite=(code:string,specifier:string,target:string)=>code.replaceAll(`"${
 let editorOutput=lower(editorSource,editorFile.pathname);
 for(const specifier of ['react','react/jsx-runtime','./structure-editor-data.ts'])editorOutput=rewrite(editorOutput,specifier,specifier.startsWith('.')?new URL(specifier,editorFile).href:import.meta.resolve(specifier));
 const editorUrl=`data:text/javascript;base64,${Buffer.from(editorOutput).toString('base64')}`;
+const quantumFile=new URL('../src/quantum-preview.tsx',import.meta.url);
+let quantumOutput=lower(await readFile(quantumFile,'utf8'),quantumFile.pathname);
+for(const specifier of ['react','react/jsx-runtime','./api.ts','./configurator-data.ts','./quantum-preview-data.ts'])quantumOutput=rewrite(quantumOutput,specifier,specifier.startsWith('.')?new URL(specifier,quantumFile).href:import.meta.resolve(specifier));
+const quantumUrl=`data:text/javascript;base64,${Buffer.from(quantumOutput).toString('base64')}`;
 let output=lower(source,filename.pathname);
-for(const specifier of ['react','react/jsx-runtime','./api.ts','./configurator-data.ts','./structure-editor-data.ts','./structure-editor.tsx']){
- const resolved=specifier==='./structure-editor.tsx'?editorUrl:specifier.startsWith('.')?new URL(specifier,filename).href:import.meta.resolve(specifier);
+for(const specifier of ['react','react/jsx-runtime','./api.ts','./configurator-data.ts','./structure-editor-data.ts','./structure-editor.tsx','./quantum-preview.tsx']){
+ const resolved=specifier==='./quantum-preview.tsx'?quantumUrl:specifier==='./structure-editor.tsx'?editorUrl:specifier.startsWith('.')?new URL(specifier,filename).href:import.meta.resolve(specifier);
  output=rewrite(output,specifier,resolved);
 }
 const ui=await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);

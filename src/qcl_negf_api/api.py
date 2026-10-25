@@ -1,5 +1,6 @@
 """Bounded HTTP adapter. AiiDA is the sole owner of execution state."""
 
+import asyncio
 import hmac
 import json
 import logging
@@ -63,8 +64,21 @@ class BodyLimit:
             await self.app(scope, receive, send)
             return
         body = bytearray()
+        quantum = scope.get('path') == '/api/v1/configurator/quantum-preview'
+        if quantum:
+            scope['quantum_deadline'] = time.monotonic() + 190
         while True:
-            message = await receive()
+            try:
+                if quantum:
+                    message = await asyncio.wait_for(receive(),max(0,scope['quantum_deadline']-5-time.monotonic()))
+                    if message['type']!='http.disconnect' and time.monotonic()>=scope['quantum_deadline']-5:
+                        raise asyncio.TimeoutError
+                else:
+                    message = await receive()
+            except asyncio.TimeoutError:
+                await JSONResponse({'status':'error','error':{'code':'timeout'}},504,
+                                   headers={'Cache-Control':'no-store'})(scope,receive,send)
+                return
             if message["type"] == "http.disconnect":
                 return
             body.extend(message.get("body", b""))
@@ -605,6 +619,7 @@ def create_app(settings: Settings | None = None, service: Any = None,
         return {
             "documentation": documentation.availability.model_dump(),
             "configurator": configurator.availability(),
+            "quantum_preview": configurator.quantum_availability() if hasattr(configurator,'quantum_availability') else {'available':False,'reason':'capability_not_provided'},
             "codes": settings.allowed_codes,
             "profile": settings.profile,
             "defaults": resource_defaults,
@@ -656,6 +671,22 @@ def create_app(settings: Settings | None = None, service: Any = None,
     @app.post("/api/v1/configurator/preview", dependencies=protected)
     async def configurator_preview(request: Request):
         return await configurator_call(request, preview=True)
+
+    @app.post('/api/v1/configurator/quantum-preview',dependencies=protected)
+    async def quantum_preview(request: Request):
+        deadline=request.scope['quantum_deadline']
+        try:
+            # Five seconds remain for owned shielded cgroup kill/reap/EOF cleanup.
+            async with asyncio.timeout_at(deadline-5):
+                raw=await request.body()
+                result=await configurator.quantum(raw,request.is_disconnected,deadline=deadline-5)
+            return Response(result,media_type='application/json',headers={'Cache-Control':'no-store'})
+        except (ConfiguratorError,asyncio.TimeoutError) as error:
+            code=error.code if isinstance(error,ConfiguratorError) else 'timeout'
+            status=409 if code=='busy' else 504 if code=='timeout' else 503 if code in {'unavailable','cleanup_unconfirmed','runner_failed'} else 422
+            payload=getattr(error,'response',None) or {'status':'error','error':{'code':code,'message':'Quantum preview refused'}}
+            return JSONResponse(payload,
+                                status_code=status,headers={'Cache-Control':'no-store'})
 
     @app.get("/api/v1/runs", dependencies=protected)
     def runs(

@@ -128,3 +128,89 @@ physical validity проверяет Runner. После любой правки 
 histories, scientific acceptance и installed browser/native usability им не
 доказаны и автоматически не запускаются. Execution, convergence, physical checks,
 discretization и experiment остаются отдельными axes с unknown для preview.
+
+## Bare quantum preview
+
+The additive authenticated, no-store
+`POST /api/v1/configurator/quantum-preview` accepts only Runner's
+`qcl-negf.quantum-preview-request.v1` envelope: exact frozen plan string/SHA,
+expected Runner/Core IDs, explicit unique execution/point/variant and fixed
+`quantum-preview-reference-v1` policy. The browser cannot choose executable,
+filesystem paths, environment, budget, URI or scientific defaults. Runner owns
+all scientific validation, model loading, basis/eigen operators and normalization.
+Existing catalog/metadata configure calls retain their60s budget; the same single
+try-acquire slot/cgroup lifecycle serves all three operations without a queue.
+
+`/config.quantum_preview` reports actual installed source-context availability,
+Core/Runner IDs and request-time memory admission. This is not a promise of
+numerical fit or currently reserved capacity. The parent getter uses the existing
+fixed `/var/lib/qcl-negf-admin/runtime/release.json`: nofollow, regular≤64KiB,
+root-owned/no022 with protected root-owned ancestors; ready and exact application/
+solver profiles, service.env release/solver/context digest, canonical source graph
+and exact refs/build/output/NAR context. Only the server builds capped10field
+child context environment. Delivery verified graph→actual build/derivation/output/
+NAR/Manifest; the child rechecks that protected record and actual loaded pkgdir/
+Project/Manifest/rules. Labels/version alone do not establish binding. No new
+record/protocol/CLI flags or per-request depot/NAR scans are introduced. Missing
+or mismatched installed delivery remains unavailable. Closed SCI gate does not
+veto this basis-only diagnostic.
+
+Before spawn a fresh≤5s guest snapshot checks kernel boot_id and actual cgroup hierarchy stability,
+MemAvailable≥2684354560bytes, all measured ancestor memory.max/high−current at
+least that amount, CPU quota/affinity, no swap credit and the short-window PSI
+avg10 gate. Cumulative memory.events and historical PSI avg60/avg300 are optional
+private snapshot observations: missing, unreadable or malformed history is unknown
+with a private reason, never zero or an admission veto. Nonzero historical totals do not
+permanently veto a healthy current snapshot. Unlimited literal `max` is retained as known unlimited.
+A global cgroup-v2 root has no parent controls on some kernels: only mountinfo
+root `/` and walking to its mountpoint permits those **root-only** missing controls
+only for the approved existing API unit whose initial guest cgroup namespace/full
+hierarchy is confirmed by native DEPLOYBIND and whose `RestrictNamespaces=true`
+(or verified equivalent unshare/setns denial) prevents namespace changes.
+NoNewPrivileges/User alone do not establish this prerequisite. A request measures
+self namespace before/after; it never reads root PID1 namespace or requests CAP/
+permission changes/new proof records. Guest MemAvailable and measured
+global PSI remain mandatory; finite ancestors are still checked. Any other
+missing control, hidden namespace ancestry, malformed/unknown fact, changed boot/
+hierarchy or old snapshot holds preview. Root-only DMI product_uuid is deliberately
+not required: local memory admission needs readable boot/cgroup/memory facts;
+release/binary authority is separately anchored by the protected record/context.
+No root publisher, permissions change or new identity file is introduced. No fallback/offload/coarsening or job
+cancellation. This guest observation does not prove host/PVE reserve or future
+availability against concurrent workloads.
+
+Deadline starts in body middleware: absolute API190s includes body/admission;
+body/work cutoff185s leaves five seconds for cleanup. Late body completion and
+already expired work deadlines refuse before binding/decode/admission/spawn;
+deadline is rechecked between these synchronous steps.
+Quantum `_run`180s spans source/parse/admission/spawn/load/basis/serialization and
+response validation; it is not the old60s clock. API reserves five seconds for
+shielded cgroup.kill/direct child reap/stream EOF/populated0/remove. Unknown
+cleanup poisons the common slot; no success or reuse is claimed. Disconnect,
+cancel and shutdown retain spawn ownership through cleanup. Child caps remain
+1CPU,2GiB memory.max,swap0,64pids, Julia/GC/BLAS/OMP1, offline immutable runtime.
+Eligibility (W≤1536 and existing dimension/screen guards) is not a measured
+180s/2GiB fit guarantee. The scientific grid/model remains unchanged on refusal.
+
+Runner writes a new server-owned private output plus atomic temporary; the
+launcher joins the prepared leaf before exact exec and applies2MiB FILESIZE.
+Stdout≤2MiB/stderr≤64KiB; private output readback must exactly equal stdout bytes.
+Temporary storage≤8MiB (one output+atomic temporary; no HDF/checkpoint/depot write).
+The API returns the original bytes, not a reserialized success DTO. Known owner
+refusals retain only safe reason/numeric actual+limit/unchanged plan hashes;
+unknown diagnostics and host paths are not returned. Busy409, timeout504,
+unavailable503, owner refusal422. No retry or alternate scientific task.
+
+The light UI offers explicit execution/point/variant selection and an explicit
+preview action, never automatic computation. Client195s AbortSignal covers
+request/response; edit/context/token/source/point changes invalidate and abort,
+late successes/errors are fenced. Download preserves exact producer JSON bytes.
+All Nb energies, Re/Im ψ, density and bare material band overlay use the recorded
+nonuniform z/units. Plot mapping is display-only and remains finite for signed
+extrema/singletons; physical values/order are retained. No UI normalization,
+energy shifting, density/scattering or physical interpolation. κ0, Hartree0,
+no T±, zero-field window/Dirichlet and degenerate-state ambiguity are explicit.
+This is not a run/attempt, SCBA/Poisson solve, transport convergence, discretization
+validation or scientific acceptance. Missing elapsed/peak/JIT remains unknown.
+Native exact-reference target/installed binding/browser qualification are separate
+finite gates; source/fixtures alone do not accept them.

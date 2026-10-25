@@ -393,17 +393,37 @@ def retained(dto, selection, source):
         if not same(source_attempt, point["source_attempt"]):
             fail("identity_mismatch")
         # Validate declared closure without opening any NFS path.
-        closure, owner = declarations(commit, relative)
+        # Retained registration pins analysis metadata, independent of the selected read role.
+        from qcl_negf_contracts.artifacts import validate_commit
+
+        validate_commit({**commit, "artifacts": []})
+        artifact_rows = commit.get("artifacts")
+        if (
+            not isinstance(artifact_rows, list)
+            or len(artifact_rows) > 4096
+            or any(not isinstance(d, dict) for d in artifact_rows)
+        ):
+            fail("corrupt_result")
+        registered = [d for d in artifact_rows if d.get("role") == "physics.analysis"]
+        if len(registered) > 1:
+            fail("corrupt_result")
+        owner = registered[0] if registered else None
         actual = (
             None
             if owner is None
             else dict(
-                path=str(Path(relative).parent / owner.path),
-                bytes=owner.size,
-                sha256=owner.sha256,
-                schema=owner.schema,
+                path=str(Path(relative).parent / path(owner["path"])),
+                bytes=owner["bytes"],
+                sha256=owner["sha256"],
+                schema=owner["schema"],
             )
         )
+        if actual is not None and (
+            actual["schema"] != "qcl-negf-physics-analysis-v4"
+            or type(actual["bytes"]) is not int
+            or actual["bytes"] < 0
+        ):
+            fail("corrupt_result")
         if not same(actual, point.get("declared_analysis")):
             fail("identity_mismatch")
         captured[name] = point
@@ -412,20 +432,32 @@ def retained(dto, selection, source):
     return record, raws, plan_raw, series, plan_obj, series_obj, captured
 
 
-def declarations(commit, relative):
+def declarations(commit, relative, *, operation="manifest"):
     from qcl_negf_contracts.artifacts import validate_commit
 
-    declared = validate_commit(commit)
+    if operation in ("diagnostics", "history"):
+        from .saved_results import _diagnostic_artifacts
+
+        declared = _diagnostic_artifacts(commit)
+    else:
+        declared = validate_commit(commit)
     bypath = {d.path: d for d in declared}
-    owners = [d for d in declared if d.role == "physics.analysis"]
+    role = "science.history" if operation in ("diagnostics", "history") else "physics.analysis"
+    owners = [d for d in declared if d.role == role]
+    if len(owners) != 1 and operation == "diagnostics":
+        return [], None
     if len(owners) > 1:
         fail("unsupported_contract")
-    for d in declared:
-        path(d.path)
     if not owners:
         return [], None
     owner = owners[0]
-    if owner.schema != "qcl-negf-physics-analysis-v4":
+    path(owner.path)
+    schema = (
+        "qcl-negf-scientific-history-v4"
+        if role == "science.history"
+        else "qcl-negf-physics-analysis-v4"
+    )
+    if owner.schema != schema:
         fail("unsupported_contract")
     if owner.size > OWNER:
         fail("budget_exceeded")
@@ -552,7 +584,9 @@ def perform(adapter, operation, selection, source, query, cancelled, deadline, c
             else None,
         }
     point = captured.get(query["point_id"])
-    if point is None or point["declared_analysis"] is None:
+    if point is None or (
+        operation not in ("diagnostics", "history") and point["declared_analysis"] is None
+    ):
         fail("unavailable_storage")
     if point["commit_sha256"] != query["source_commit_sha256"]:
         fail("identity_mismatch")
@@ -566,6 +600,23 @@ def perform(adapter, operation, selection, source, query, cancelled, deadline, c
     ):
         fail("unavailable_storage")
     relative = path(storage["relative_result_root"])
+    declarations(_json(raws[point["commit_path"]]), point["commit_path"], operation=operation)
+    native_expected = dict(point["native_identity"])
+    if operation in ("diagnostics", "history"):
+        native_expected = {
+            k: v
+            for k, v in native_expected.items()
+            if (k not in {"run_uuid", "calcjob_uuid"} or v is not None)
+            and k
+            in {
+                "point_id",
+                "execution_id",
+                "attempt",
+                "plan_fingerprint",
+                "run_uuid",
+                "calcjob_uuid",
+            }
+        }
     request = dict(
         provider_source=source,
         binding=binding,
@@ -575,12 +626,14 @@ def perform(adapter, operation, selection, source, query, cancelled, deadline, c
         commit_path=point["commit_path"],
         commit_metadata=raws[point["commit_path"]].decode(),
         expected_identity={
-            **point["native_identity"],
+            **native_expected,
             "source_commit_sha256": point["commit_sha256"],
         },
     )
     if operation == "slice":
         request.update(view_id=query["view_id"], selection=query["selection"])
+    if operation == "history":
+        request.update(phase=query["phase"], selection=query["selection"])
     spool = tempfile.TemporaryDirectory(prefix="qcl-saved-nfs-", dir="/tmp")
     try:
         check()
@@ -689,7 +742,9 @@ def child_access(request):
     }
     if request.get("operation") == "slice":
         allowed |= {"view_id", "selection"}
-    elif request.get("operation") != "manifest":
+    elif request.get("operation") == "history":
+        allowed |= {"phase", "selection"}
+    elif request.get("operation") not in ("manifest", "diagnostics"):
         fail("unsupported_contract")
     if set(request) != allowed:
         fail("selection_required")
@@ -725,6 +780,10 @@ def child_access(request):
                 or item["step"] < 1
             ):
                 fail("selection_required")
+    if request["operation"] == "history":
+        from .saved_results import _history_selection
+
+        _history_selection(request.get("phase"), request.get("selection"))
     binding = validate_binding(request["binding"])
     if sha(canonical(binding)) != request["binding_sha256"]:
         fail("identity_mismatch")
@@ -740,7 +799,7 @@ def child_access(request):
         fail("budget_exceeded")
     if sha(raw) != request["expected_identity"]["source_commit_sha256"]:
         fail("identity_mismatch")
-    closure, owner = declarations(_json(raw), commit_path)
-    if owner is None:
+    closure, owner = declarations(_json(raw), commit_path, operation=request["operation"])
+    if owner is None and request["operation"] != "diagnostics":
         fail("unsupported_contract")
     return _access(binding["root"], relative, [commit_path, *closure])

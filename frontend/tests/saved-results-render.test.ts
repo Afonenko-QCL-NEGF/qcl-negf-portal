@@ -12,6 +12,14 @@ const source=await readFile(filename,'utf8');
 const transpiled=ts.transpileModule(source,{fileName:filename.pathname,reportDiagnostics:true,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}});
 assert.deepEqual((transpiled.diagnostics??[]).filter(d=>d.category===ts.DiagnosticCategory.Error).map(d=>ts.flattenDiagnosticMessageText(d.messageText,'\n')),[],'SavedPlot TSX must parse before SSR');
 let output=transpiled.outputText;
+const diagnosticFile=new URL('../src/saved-diagnostics.tsx',import.meta.url);
+const diagnosticLowered=ts.transpileModule(await readFile(diagnosticFile,'utf8'),{fileName:diagnosticFile.pathname,reportDiagnostics:true,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}});
+assert.deepEqual((diagnosticLowered.diagnostics??[]).filter(d=>d.category===ts.DiagnosticCategory.Error).map(d=>ts.flattenDiagnosticMessageText(d.messageText,'\n')),[]);
+let diagnosticCode=diagnosticLowered.outputText;
+for(const specifier of ['react','react/jsx-runtime','./api.ts','./saved-results-data.ts','./saved-diagnostics-data.ts']){const resolved=specifier.startsWith('.')?new URL(specifier,diagnosticFile).href:import.meta.resolve(specifier);diagnosticCode=diagnosticCode.replaceAll(`"${specifier}"`,JSON.stringify(resolved)).replaceAll(`'${specifier}'`,JSON.stringify(resolved));}
+const diagnosticUrl=`data:text/javascript;base64,${Buffer.from(diagnosticCode).toString('base64')}`;
+output=output.replaceAll('"./saved-diagnostics.tsx"',JSON.stringify(diagnosticUrl)).replaceAll("'./saved-diagnostics.tsx'",JSON.stringify(diagnosticUrl));
+
 for(const [specifier,target] of [['react','react'],['react/jsx-runtime','react/jsx-runtime'],['./api','./api.ts'],['./saved-results-data','./saved-results-data.ts']]){
  const resolved=specifier.startsWith('.')?new URL(target,filename).href:import.meta.resolve(target);
  output=output.replaceAll(`"${specifier}"`,JSON.stringify(resolved)).replaceAll(`'${specifier}'`,JSON.stringify(resolved));

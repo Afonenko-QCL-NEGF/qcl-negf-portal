@@ -30,6 +30,7 @@ class Settings:
     configurator_catalog_root: str | None = None
     configurator_catalog_source_id: str | None = None
     configurator_cgroup_root: str | None = None
+    saved_results_enabled: bool = True
     max_machines: int = 1
     max_processes_per_machine: int = 1
     max_cores_per_process: int = 64
@@ -49,6 +50,8 @@ class Settings:
     actor_max_open_artifacts: int = ACTOR_DEFAULTS["actor_max_open_artifacts"]
 
     def __post_init__(self) -> None:
+        if type(self.saved_results_enabled) is not bool:
+            raise ValueError("saved_results_enabled must be boolean")
         for name in ACTOR_DEFAULTS:
             value = getattr(self, name)
             maximum = 256 if name == "actor_max_pending_calls" else 64
@@ -144,5 +147,8 @@ class Settings:
             configurator_catalog_root=os.environ.get("QCL_NEGF_CONFIGURATOR_CATALOG_ROOT"),
             configurator_catalog_source_id=os.environ.get("QCL_NEGF_CONFIGURATOR_CATALOG_SOURCE_ID"),
             configurator_cgroup_root=os.environ.get("QCL_NEGF_CONFIGURATOR_CGROUP_ROOT"),
+            saved_results_enabled=(
+                os.environ.get("QCL_NEGF_SAVED_RESULTS_ENABLED", "true") == "true"
+            ),
             **limits,
         )

@@ -391,19 +391,27 @@ class AiidaService:
         return self._admit("reader_" + name, (value,), {}, lease=lease)
 
     @contextmanager
-    def open_artifact(self, identifier, execution_id, path, *, attempt=None, calcjob_uuid=None):
+    def open_artifact(self, identifier, execution_id, path, *, attempt=None, calcjob_uuid=None,
+                      close_observer: Callable[[CloseResult], None] | None = None):
         lease = _Lease(str(uuid4()))
-        reader = self._admit(
-            "artifact_enter",
-            (identifier, execution_id, path),
-            {"attempt": attempt, "calcjob_uuid": calcjob_uuid},
-            lease=lease,
-        )
+        try:
+            reader = self._admit(
+                "artifact_enter",
+                (identifier, execution_id, path),
+                {"attempt": attempt, "calcjob_uuid": calcjob_uuid},
+                lease=lease,
+            )
+        except ActorUnavailable as error:
+            if close_observer is not None and error.receipt.outcome == "unknown":
+                close_observer(CloseResult("stopping", None, 1, "lease_cleanup_pending"))
+            raise
         try:
             yield reader
         finally:
             exception = sys.exc_info()
             result = self._release(lease, exception=exception)
+            if close_observer is not None:
+                close_observer(result)
             if exception[0] is None and result.state != "completed":
                 message = _Message("artifact_exit", (), {}, self._clock())
                 cls = ActorDeadline if result.state == "stopping" else ActorUnavailable

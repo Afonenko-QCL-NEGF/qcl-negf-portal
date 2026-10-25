@@ -840,7 +840,7 @@ def create_app(settings: Settings | None = None, service: Any = None,
                 {"run_uuid": str(run_uuid), **selection}, query, request.is_disconnected)
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except SavedResultError as exc:
-            status = (409 if exc.code in {"busy", "identity_mismatch"} else
+            status = (409 if exc.code in {"busy", "identity_mismatch", "source_changed"} else
                       503 if exc.code in {"unavailable_storage", "stopping"} else 422)
             return JSONResponse({"detail": {"code": exc.code,
                 "reason": "Saved result is unavailable for this exact selection"}},
@@ -898,6 +898,27 @@ def create_app(settings: Settings | None = None, service: Any = None,
         except SavedResultError:
             return JSONResponse({"detail": {"code": "selection_required",
                 "reason": "Use only exact provenance and semantic native selection"}},422,
+                headers={"Cache-Control": "no-store"})
+        return await saved_call(request, run_uuid, operation, selection, payload)
+
+    @app.post("/api/v1/runs/{run_uuid}/live-results/{operation}", dependencies=protected)
+    async def live_results(request: Request, run_uuid: UUID, operation: str):
+        if operation not in {"live-source", "live-history", "performance"}:
+            raise HTTPException(404, "Unknown live operation")
+        try:
+            from .saved_results import _json
+            payload = _json(await request.body())
+            required = {"execution_id", "attempt", "calcjob_uuid"}
+            if operation != "performance":
+                required |= {"point_id", "source_attempt"}
+            if operation == "live-history":
+                required |= {"index_sha256", "generation", "phase", "selection"}
+            if not isinstance(payload, dict) or set(payload) != required or request.query_params:
+                raise SavedResultError("selection_required")
+            selection = {k: payload.pop(k) for k in ("execution_id", "attempt", "calcjob_uuid")}
+        except SavedResultError:
+            return JSONResponse({"detail": {"code": "selection_required",
+                "reason": "Exact execution, point and native prefix selectors required"}}, 422,
                 headers={"Cache-Control": "no-store"})
         return await saved_call(request, run_uuid, operation, selection, payload)
 

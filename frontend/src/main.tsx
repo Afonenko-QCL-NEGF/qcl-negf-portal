@@ -33,6 +33,7 @@ import {
 import { PublishedReference, RunModelHelp } from "./model-help";
 import { RunStructure } from "./run-structure";
 import { SavedResultsPanel } from "./saved-results";
+import { LivePerformance } from "./live-performance";
 import { ResearchCards } from "./research-cards";
 import { Configurator } from "./configurator";
 import { SubmissionGate, mutationUncertain, verifyPlan } from "./configurator-data.ts";
@@ -710,6 +711,7 @@ function App() {
                     )}
                     <RunStructure key={detail.uuid} run={detail} />
                     <SavedResultsPanel key={detail.uuid} token={token} run={detail} />
+                    <LivePerformance key={`live-${detail.uuid}`} token={token} run={detail} />
                     {detail.children && detail.children.length > 0 && (
                       <>
                         <h4>Executions</h4>

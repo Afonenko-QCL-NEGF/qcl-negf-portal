@@ -31,6 +31,7 @@ class Settings:
     configurator_catalog_source_id: str | None = None
     configurator_cgroup_root: str | None = None
     saved_results_enabled: bool = True
+    saved_results_binding_file: str | None = None
     max_machines: int = 1
     max_processes_per_machine: int = 1
     max_cores_per_process: int = 64
@@ -147,6 +148,7 @@ class Settings:
             configurator_catalog_root=os.environ.get("QCL_NEGF_CONFIGURATOR_CATALOG_ROOT"),
             configurator_catalog_source_id=os.environ.get("QCL_NEGF_CONFIGURATOR_CATALOG_SOURCE_ID"),
             configurator_cgroup_root=os.environ.get("QCL_NEGF_CONFIGURATOR_CGROUP_ROOT"),
+            saved_results_binding_file=os.environ.get("QCL_NEGF_SAVED_RESULTS_BINDING_FILE"),
             saved_results_enabled=(
                 os.environ.get("QCL_NEGF_SAVED_RESULTS_ENABLED", "true") == "true"
             ),

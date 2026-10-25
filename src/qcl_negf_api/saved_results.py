@@ -45,6 +45,14 @@ ERRORS = {
 
 class SavedResultError(Exception):
     def __init__(self, code):
+        code = {
+            "source_identity_mismatch": "identity_mismatch",
+            "request_conflict": "identity_mismatch",
+            "source_selection_required": "selection_required",
+            "source_unavailable": "unavailable_storage",
+            "source_not_quiescent": "unavailable_storage",
+            "invalid_binding": "unavailable_storage",
+        }.get(code, code)
         self.code = code if code in ERRORS else "corrupt_result"
         super().__init__(self.code)
 
@@ -134,13 +142,23 @@ def _brief(metadata, **kwargs):
 class SavedResults:
     """One request/cleanup at a time, including detached actor leases and temp files."""
 
-    def __init__(self, service, settings, *, brief=None, worker=None, cleanup_seconds=1.0):
+    def __init__(
+        self, service, settings, *, brief=None, worker=None, cleanup_seconds=1.0, binding=None
+    ):
+        from .saved_nfs import load_binding, validate_binding
+
+        self.binding = (
+            load_binding(getattr(settings, "saved_results_binding_file", None))
+            if binding is None
+            else validate_binding(binding)
+        )
         self.service, self.settings = service, settings
         self.brief = brief or _brief
         self.worker = worker or _worker
         self.busy = False
         self.closed = False
         self.lease_cleanup_unconfirmed = False
+        self.pending_spools = []
         self.active = None
         self.cancelled = None
         self.cleanup_seconds = cleanup_seconds
@@ -197,6 +215,12 @@ class SavedResults:
             # merely because its asyncio waiter stopped waiting.
             if self.active is actual:
                 self.active = self.cancelled = None
+                if not actual.cancelled():
+                    error = actual.exception()
+                    if getattr(error, "cleanup_unconfirmed", False) or (
+                        isinstance(error, ActorUnavailable) and error.receipt.outcome == "unknown"
+                    ):
+                        self.lease_cleanup_unconfirmed = self.closed = True
                 self.busy = self.lease_cleanup_unconfirmed
 
         future.add_done_callback(completed)
@@ -247,6 +271,15 @@ class SavedResults:
                 raise SavedResultError("budget_exceeded")
 
         check()
+        from .saved_nfs import catalogue, perform, provider
+
+        if operation == "sources":
+            if query:
+                raise SavedResultError("selection_required")
+            result = catalogue(self, selection)
+            check()
+            return result
+        source, query = provider(query)
         if operation not in ("brief", "manifest", "slice"):
             raise SavedResultError("unsupported_contract")
         allowed = (
@@ -292,6 +325,8 @@ class SavedResults:
                     or item["step"] < 1
                 ):
                     raise SavedResultError("selection_required")
+        if source["provider"] == "nfs_registered":
+            return perform(self, operation, selection, source, query, cancelled, deadline, check)
         selectors = {k: selection[k] for k in ("attempt", "calcjob_uuid")}
         args = (selection["run_uuid"], selection["execution_id"])
         bound = self.service.get_export_selection(*args, **selectors)
@@ -405,6 +440,7 @@ class SavedResults:
         check()
         common = {
             "provider_selection": selection,
+            "provider_source": source,
             "metadata_sha256": digest,
             "provider_limits": {
                 "metadata_bytes": METADATA,
@@ -569,12 +605,19 @@ class SavedResults:
             check()
             result = self.worker(operation, request, root, cancelled, deadline)
             check()
+        except BaseException as exc:
+            if getattr(exc, "cleanup_unconfirmed", False):
+                self.closed = self.lease_cleanup_unconfirmed = True
+                self.pending_spools.append(temporary)
+                temporary = None
+            raise
         finally:
-            try:
-                temporary.cleanup()
-            except OSError as exc:
-                self.closed = True
-                raise SavedResultError("unavailable_storage") from exc
+            if temporary is not None:
+                try:
+                    temporary.cleanup()
+                except OSError as exc:
+                    self.closed = True
+                    raise SavedResultError("unavailable_storage") from exc
         return {
             **result,
             **common,
@@ -647,12 +690,39 @@ def _worker(operation, request, root, cancelled, deadline):
         return value
     finally:
         try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.wait()
-        child.stdout.close()
-        child.stderr.close()
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+            child.stdout.close()
+            child.stderr.close()
+        except BaseException as exc:
+            error = SavedResultError("unavailable_storage")
+            error.cleanup_unconfirmed = True
+            raise error from exc
+
+
+def _read_request(request, spool):
+    from qcl_negf_results.saved_views import describe_saved_views, read_saved_view
+
+    if "data_root" in request or "provider_source" in request:
+        from .saved_nfs import child_access
+
+        root = child_access(request)
+    else:
+        root = spool
+    commit = root / _path(request["commit_path"])
+    if request["operation"] == "manifest":
+        return describe_saved_views(commit, expected_identity=request["expected_identity"])
+    if request["operation"] == "slice":
+        return read_saved_view(
+            commit,
+            request["view_id"],
+            request["selection"],
+            expected_identity=request["expected_identity"],
+        )
+    raise SavedResultError("unsupported_contract")
 
 
 def _main():
@@ -664,21 +734,7 @@ def _main():
         resource.setrlimit(resource.RLIMIT_FSIZE, (RESPONSE, RESPONSE))
         os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
         request = _json(Path(sys.argv[1]).read_bytes())
-        from qcl_negf_results.saved_views import describe_saved_views, read_saved_view
-
-        root = Path(sys.argv[1]).parent
-        commit = root / _path(request["commit_path"])
-        if request["operation"] == "manifest":
-            result = describe_saved_views(commit, expected_identity=request["expected_identity"])
-        elif request["operation"] == "slice":
-            result = read_saved_view(
-                commit,
-                request["view_id"],
-                request["selection"],
-                expected_identity=request["expected_identity"],
-            )
-        else:
-            raise SavedResultError("unsupported_contract")
+        result = _read_request(request, Path(sys.argv[1]).parent)
         sys.stdout.buffer.write(_bytes(result))
     except Exception as exc:
         sys.stdout.buffer.write(

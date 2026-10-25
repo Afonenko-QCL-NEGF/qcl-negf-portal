@@ -1,8 +1,8 @@
 import {useEffect,useRef,useState} from 'react';
 import {api,errorMessage} from './api';
 import type {Run} from './api';
-import {cellEdges,currentPaths,displayScale,readBrief,readManifest,readSlice,SavedSession,selectionOptions} from './saved-results-data';
-import type {Masks,Numbers,SavedAxis,SavedBrief,SavedManifest,SavedPoint,SavedSelection,SavedSlice,SavedView} from './saved-results-data';
+import {cellEdges,currentPaths,displayScale,readBrief,readManifest,readSlice,readSources,retrievedSource,SavedSession,selectionOptions} from './saved-results-data';
+import type {Masks,Numbers,SavedAxis,SavedBrief,SavedManifest,SavedPoint,SavedSelection,SavedSlice,SavedView,SavedProviderSource,SavedSources} from './saved-results-data';
 
 const show=(v:unknown)=>v==null?'unknown':typeof v==='object'?JSON.stringify(v):String(v);
 const number=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v);
@@ -121,36 +121,52 @@ export function SavedResultsPanel({token,run}:{token:string;run:Run}){
  const options=selectionOptions(run),session=useRef(new SavedSession());
  const [choice,setChoice]=useState(''),[brief,setBrief]=useState<SavedBrief|null>(null),[point,setPoint]=useState<SavedPoint|null>(null);
  const [manifest,setManifest]=useState<SavedManifest|null>(null),[viewId,setViewId]=useState(''),[slice,setSlice]=useState<SavedSlice|null>(null);
+ const [provider,setProvider]=useState(''),[sources,setSources]=useState<SavedSources|null>(null),[sourceChoice,setSourceChoice]=useState('');
+ const registered=sources?.sources.find(s=>s.source_uuid===sourceChoice);
+ const source:SavedProviderSource|undefined=provider==='aiida_retrieved'?retrievedSource:provider==='nfs_registered'&&registered?{provider:'nfs_registered',source_uuid:registered.source_uuid,source_sha256:registered.source_sha256}:undefined;
  const [fields,setFields]=useState<Record<string,string>>({}),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  const selection:SavedSelection|undefined=options.find(v=>`${v.execution_id}/${v.attempt}/${v.calcjob_uuid}`===choice);
- useEffect(()=>{session.current.invalidate();setBusy(false);setBrief(null);setPoint(null);setManifest(null);setSlice(null);setViewId('');return()=>session.current.invalidate();},[token,run.uuid,selection?.execution_id,selection?.attempt,selection?.calcjob_uuid]);
+ useEffect(()=>{reset();setSources(null);setSourceChoice('');return()=>session.current.invalidate();},[token,run.uuid,selection?.execution_id,selection?.attempt,selection?.calcjob_uuid,provider]);
+ useEffect(()=>{reset();},[source?.provider,source?.source_uuid,source?.source_sha256]);
  const view=manifest?.views.find(v=>v.view_id===viewId);
  function invalidate(){session.current.invalidate();setBusy(false);setError('');setSlice(null);}
- async function load(kind:'brief'|'manifest'|'slice',cursor?:string){
-  if(!selection)return;const selected=selection,id=session.current.begin();setBusy(true);setError('');
+ function reset(){invalidate();setBrief(null);setPoint(null);setManifest(null);setViewId('');setFields({});}
+ function resetSource(){reset();setSources(null);setSourceChoice('');}
+ async function load(kind:'sources'|'brief'|'manifest'|'slice',cursor?:string){
+  if(!selection||(kind!=='sources'&&!source))return;const selected=selection,pinned=source,id=session.current.begin();setBusy(true);setError('');
   await session.current.receive(id,async()=>{
    const base=`/runs/${encodeURIComponent(run.uuid)}/saved-results/`;
-   const context={execution_id:selected.execution_id,attempt:selected.attempt,calcjob_uuid:selected.calcjob_uuid};
-   if(kind==='brief'){const query=new URLSearchParams({...context,attempt:String(context.attempt),...(cursor?{cursor}:{})});return readBrief(await api(token,base+'brief?'+query),selected);}
+   const exact={execution_id:selected.execution_id,attempt:selected.attempt,calcjob_uuid:selected.calcjob_uuid};
+   if(kind==='sources'){const query=new URLSearchParams({...exact,attempt:String(exact.attempt)});return readSources(await api(token,base+'sources?'+query),selected);}
+   if(!pinned)throw new Error('Select an exact source');
+   const context={...exact,provider:pinned.provider,...(pinned.provider==='nfs_registered'?{source_uuid:pinned.source_uuid!,source_sha256:pinned.source_sha256!}:{})};
+   if(kind==='brief'){const query=new URLSearchParams(Object.entries({...context,...(cursor?{cursor}:{})}).map(([k,v])=>[k,String(v)]));return readBrief(await api(token,base+'brief?'+query),selected,pinned);}
    if(!point||!brief||!point.source_commit_sha256)throw new Error('Select a saved point and captured commit');
    const pin={...context,point_id:point.point_id,source_commit_sha256:point.source_commit_sha256,metadata_sha256:brief.metadata_sha256};
-   if(kind==='manifest'){const query=new URLSearchParams({...pin,attempt:String(pin.attempt)});return readManifest(await api(token,base+'manifest?'+query),selected,point.point_id,point.source_commit_sha256,brief.metadata_sha256);}
+   if(kind==='manifest'){const query=new URLSearchParams(Object.entries(pin).map(([k,v])=>[k,String(v)]));return readManifest(await api(token,base+'manifest?'+query),selected,point.point_id,point.source_commit_sha256,brief.metadata_sha256,pinned,point);}
    if(!view)throw new Error('Select an available semantic view');
-   return readSlice(await api(token,base+'slice',{...pin,view_id:viewId,selection:nativeSelection(view,fields)}),selected,point.point_id,point.source_commit_sha256,viewId,brief.metadata_sha256);
-  },value=>{if(kind==='brief'){setBrief(value as SavedBrief);setPoint(null);setManifest(null);setViewId('');setSlice(null);}else if(kind==='manifest'){setManifest(value as SavedManifest);setViewId('');setSlice(null);}else setSlice(value as SavedSlice);setBusy(false);},e=>{setError(errorMessage(e));setBusy(false);});
+   return readSlice(await api(token,base+'slice',{...pin,view_id:viewId,selection:nativeSelection(view,fields)}),selected,point.point_id,point.source_commit_sha256,viewId,brief.metadata_sha256,pinned,manifest??undefined);
+  },value=>{if(kind==='sources'){setSources(value as SavedSources);}else if(kind==='brief'){setBrief(value as SavedBrief);setPoint(null);setManifest(null);setViewId('');setSlice(null);}else if(kind==='manifest'){setManifest(value as SavedManifest);setViewId('');setSlice(null);}else setSlice(value as SavedSlice);setBusy(false);},e=>{setError(errorMessage(e));setBusy(false);});
  }
- return <section className="saved-results"><h3>Сохранённый транспорт</h3><p>Saved repository projections only. Explicit run → execution/variant → attempt/CalcJob → point/commit. No new solver, scientific acceptance or NFS provider.</p>
- <label>Execution / attempt / exact CalcJob<select value={choice} onChange={e=>{invalidate();setChoice(e.target.value);setBrief(null);setPoint(null);setManifest(null);setViewId('');}}><option value="">Select explicitly</option>{options.map(v=><option key={v.calcjob_uuid} value={`${v.execution_id}/${v.attempt}/${v.calcjob_uuid}`}>{v.execution_id} · attempt {v.attempt} · {v.calcjob_uuid}</option>)}</select></label>
+ return <section className="saved-results"><h3>Сохранённый транспорт</h3><p>Explicit run → execution/variant → attempt/CalcJob → provider/source → point/commit. Registered metadata and native payload integrity are distinct from scientific acceptance. No new solver starts.</p>
+ <label>Execution / attempt / exact CalcJob<select value={choice} onChange={e=>{resetSource();setChoice(e.target.value);}}><option value="">Select explicitly</option>{options.map(v=><option key={v.calcjob_uuid} value={`${v.execution_id}/${v.attempt}/${v.calcjob_uuid}`}>{v.execution_id} · attempt {v.attempt} · {v.calcjob_uuid}</option>)}</select></label>
  {!options.length&&<p>No exact retained attempt inventory is available.</p>}
- <button type="button" disabled={!selection||busy} onClick={()=>void load('brief')}>Read saved metadata</button>
+ <label>Saved provider<select value={provider} onChange={e=>{resetSource();setProvider(e.target.value);}}><option value="">Select provider explicitly</option><option value="aiida_retrieved">AiiDA retrieved repository</option><option value="nfs_registered">Registered retained NFS source</option></select></label>
+ {provider==='nfs_registered'&&<><button type="button" disabled={!selection||busy} onClick={()=>void load('sources')}>Read registered sources</button>
+ {sources&&<><p>Registration metadata verified; storage binding {sources.storage_binding_status}; payload access not checked. {sources.sources.length} retained sources; complete catalogue.</p>
+ <label>Registered source UUID / SHA<select value={sourceChoice} onChange={e=>{reset();setSourceChoice(e.target.value);}}><option value="">Select source explicitly</option>{sources.sources.map(s=><option key={s.source_uuid} value={s.source_uuid}>{s.source_uuid} · {s.source_sha256}</option>)}</select></label>
+ {!sources.sources.length&&<p>No registered source for this exact attempt.</p>}{registered&&<p>Metadata {registered.metadata_status}; copy status {show(registered.copy_status)}; access {registered.access_status}.</p>}</>}</>}
+
+ <button type="button" disabled={!selection||!source||busy} onClick={()=>void load('brief')}>Read saved metadata</button>
  {error&&<p role="alert" className="error">{error}</p>}{busy&&<p role="status">Reading bounded saved selection…</p>}
- {brief&&<><p>Source: aiida_retrieved; run {run.uuid}; definition {show(brief.identity.definition_id)}; variant {show(brief.identity.variant_id)}. Metadata SHA {brief.metadata_sha256}. Page {brief.points.length}/{brief.total}; {brief.complete_page?'complete set':'partial page'}.</p>
+ {brief&&<><p>Source: {brief.provider_source.provider}; source UUID {show(brief.provider_source.source_uuid)}; source SHA {show(brief.provider_source.source_sha256)}; run {run.uuid}; definition {show(brief.identity.definition_id)}; variant {show(brief.identity.variant_id)}. Metadata SHA {brief.metadata_sha256}. Page {brief.points.length}/{brief.total}; {brief.complete_page?'complete set':'partial page'}.</p>
+ {brief.provider_source.provider==='nfs_registered'&&<p>Registered snapshot complete: {show(brief.snapshot_complete)}. Storage {brief.storage_binding_status}; native payload access remains unmeasured until requested.</p>}
  <p>Raw series statuses: {show(brief.statuses)}. Discretization and experimental validation remain unknown unless recorded in source.</p>
- <details><summary>Exact saved provenance and raw assessments</summary><pre>{JSON.stringify({selection:brief.provider_selection,identity:brief.identity,source:brief.source,statuses:brief.statuses},null,2)}</pre></details>
+ <details><summary>Exact saved provenance and raw assessments</summary><pre>{JSON.stringify({selection:brief.provider_selection,identity:brief.identity,source:brief.source,provider_source:brief.provider_source,statuses:brief.statuses},null,2)}</pre></details>
  <CurrentVoltage brief={brief}/>{brief.next_cursor&&<button type="button" disabled={busy} onClick={()=>void load('brief',brief.next_cursor!)}>Next pinned page</button>}
- <label>Saved point / commit<select value={point?.point_id??''} onChange={e=>{invalidate();setPoint(brief.points.find(p=>p.point_id===e.target.value)??null);setManifest(null);setViewId('');}}><option value="">Select explicitly</option>{brief.points.map(p=><option key={p.point_id} value={p.point_id} disabled={!p.source_commit_sha256}>{p.point_id} · source attempt {show(p.source_attempt)} · {p.source_commit_sha256??'commit unavailable'}</option>)}</select></label>
- {point&&<p>Conditions {show(point.coordinates)}; commit {point.source_commit_sha256}; source attempt {show(point.source_attempt)}; provider attempt {selection?.attempt}.</p>}
- <button type="button" disabled={!point?.source_commit_sha256||busy} onClick={()=>void load('manifest')}>Describe saved views</button></>}
+ <label>Saved point / commit<select value={point?.point_id??''} onChange={e=>{invalidate();setPoint(brief.points.find(p=>p.point_id===e.target.value)??null);setManifest(null);setViewId('');setFields({});}}><option value="">Select explicitly</option>{brief.points.map(p=><option key={p.point_id} value={p.point_id} disabled={!p.source_commit_sha256}>{p.point_id} · source attempt {show(p.source_attempt)} · {p.analysis_source_status??'repository'} · {p.source_commit_sha256??'commit unavailable'}</option>)}</select></label>
+ {point&&<p>Conditions {show(point.coordinates)}; commit {point.source_commit_sha256}; source attempt {show(point.source_attempt)}; provider attempt {selection?.attempt}. Analysis source {point.analysis_source_status??'repository'}; native identity {show(point.source_native_identity)}; source CalcJob {show(point.source_calcjob_uuid)}.</p>}
+ <button type="button" disabled={!point?.source_commit_sha256||busy||(provider==='nfs_registered'&&(brief.storage_binding_status==='binding_unavailable'||point.analysis_source_status!=='registered'))} onClick={()=>void load('manifest')}>Describe saved views</button></>}
  {manifest&&<><label>Saved semantic view<select value={viewId} onChange={e=>{invalidate();setViewId(e.target.value);setFields({});}}><option value="">Select a view</option>{manifest.views.map(v=><option key={v.view_id} value={v.view_id} disabled={v.availability!=='available'}>{v.view_id} · {v.units??''} · {v.availability}{v.reason?': '+v.reason:''}</option>)}</select></label>
  <details><summary>Saved source and capabilities</summary><pre>{JSON.stringify({files:manifest.files,integrity:manifest.integrity,views:manifest.views},null,2)}</pre></details></>}
  {view?.availability==='available'&&<><p>Native shape {view.shape?.join(' × ')}; {view.basis??'no basis'}; {view.units}. Explicit component: {view.view_id}. Matrix/state display bounds are enforced by Results.</p>

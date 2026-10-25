@@ -17,6 +17,8 @@ import {
   readableBytes,
   refreshWorkflowView,
   selectWorkflowRun,
+  configuredRequest,
+  ordinarySubmission,
   type Artifact,
   type AgentReport,
   type AgentReportReceipt,
@@ -25,6 +27,7 @@ import {
   type ExportSelection,
   type ReportEntry,
   type Resources,
+  type ResourcesMode,
   type Run,
 } from "./api";
 import { PublishedReference, RunModelHelp } from "./model-help";
@@ -267,6 +270,7 @@ function App() {
   const selectedRun = useRef<string | null>(null);
   const [code, setCode] = useState("");
   const [label, setLabel] = useState("");
+  const [resourcesMode, setResourcesMode] = useState<ResourcesMode>('manual');
   const [resources, setResources] = useState<Resources>({
     num_machines: 1,
     num_mpiprocs_per_machine: 1,
@@ -310,6 +314,7 @@ function App() {
       const value = await api<Config>(draftToken, "/config");
       setConfig(value);
       setResources(value.defaults);
+      setResourcesMode('manual');
       setCode(value.codes[0]);
       setToken(draftToken);
       setDraftToken("");
@@ -355,9 +360,10 @@ function App() {
     setBusy(true);
     setError("");
     const submittedToken = token;
-    const submission = {plan: selection.plan, code_uuid: code, resources: {...resources}, label};
     let dispatched = false, uncertain = false;
     try {
+      const submission = ordinarySubmission(resourcesMode, config,
+        {plan: selection.plan, code_uuid: code, resources, label});
       if (selection.sha256) await verifyPlan(selection.plan, selection.sha256);
       if (!submissionGate.current.current(selection)) return;
       dispatched = true;
@@ -520,7 +526,7 @@ function App() {
                   Generate the JSON plan with <code>qcl-negf plan CONFIG</code>.
                   Slurm allocates the requested resources for each execution.
                 </p>
-                <Configurator token={token} context={JSON.stringify({code, resources, label, planInputRevision})}
+                <Configurator token={token} context={JSON.stringify({code, resourcesMode, resources, label, planInputRevision})}
                   availability={config.configurator} onPlan={acceptConfiguredPlan}/>
                 <form onSubmit={submit}>
                   <div className="form-grid">
@@ -553,13 +559,36 @@ function App() {
                         ))}
                       </select>
                     </label>
+                    <label className="wide">
+                      Resource request mode
+                      <select value={resourcesMode} onChange={event => {
+                        submissionContextChanged();
+                        setResourcesMode(event.target.value as ResourcesMode);
+                      }}>
+                        <option value="manual">Manual CPU / RAM</option>
+                        <option value="automatic" disabled={!configuredRequest(config)}>
+                          Automatic configured request ceiling
+                        </option>
+                      </select>
+                    </label>
+                    <p className="wide">
+                      {resourcesMode === 'automatic'
+                        ? `Запрос: 1 node / 1 process, ${config.limits.num_cores_per_mpiproc} CPU, ${config.limits.max_memory_kb} KiB RAM. Источник: configured_request_ceiling для selected Code; это не inventory и не optimum.`
+                        : 'Manual: CPU и RAM задаются явно в пределах настроенных ceilings.'}
+                      {' '}Availability: not_measured. Actual allocated CPU/RAM: not_measured; allocation authority: Slurm.
+                      {' '}Forecast: advisory; numerical preview estimates относятся только к текущему frozen plan.
+                      {' '}Confidence: uncalibrated; runtime overhead: unknown; reserve: from_frozen_runner_policy.
+                      {' '}Это выбор запроса, не full RSS fit и не scientific/shared-quota permission.
+                      {' '}Unavailable forecast или launch_allowed=false/shared_grant_unavailable сами не дают permission и не являются veto отдельно разрешённого ordinary submit; existing admission сохраняется.
+                      {' '}Generic ordinary submit не обеспечивает named one-attempt grant: owning defaults допускают до 3 attempts / 4 concurrent executions.
+                    </p>
                     {(
                       [
                         "num_cores_per_mpiproc",
                         "max_memory_kb",
                         "max_wallclock_seconds",
                       ] as (keyof Resources)[]
-                    ).map((key) => (
+                    ).filter(key => resourcesMode === 'manual' || key === 'max_wallclock_seconds').map((key) => (
                       <label key={key}>
                         {
                           {

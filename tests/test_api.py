@@ -948,3 +948,128 @@ def test_run_structure_passthrough_requires_auth(service):
         response = client.get(f"/api/v1/runs/{RUN}", headers=AUTH)
     assert response.status_code == 200 and response.json() == expected
     assert reads == [RUN]
+
+
+@pytest.mark.parametrize("walltime", [None, 1200])
+def test_automatic_resources_use_configured_ceiling_and_keep_raw_plan(service, walltime):
+    import hashlib
+
+    raw = '{\n "energy": 1.234567890123456789, "units": "μeV"\n}\n'
+    settings = Settings(
+        TOKEN, (CODE,), max_cores_per_process=12, max_memory_kb=34603008,
+        max_wallclock_seconds=1800,
+    )
+    with TestClient(create_app(settings, service)) as client:
+        config = client.get("/api/v1/config", headers=AUTH).json()
+        assert config["ordinary_resources"] == {
+            "request_selection": "configured_request_ceiling",
+            "allocation_authority": "slurm",
+            "availability": "not_measured",
+            "forecast": "advisory",
+            "runtime_overhead": "unknown",
+            "reserve": "from_frozen_runner_policy",
+            "confidence": "uncalibrated",
+            "allocated_cpus": "not_measured",
+            "allocated_memory": "not_measured",
+        }
+        payload = {"plan": raw, "code_uuid": CODE, "resources_mode": "automatic"}
+        if walltime is not None:
+            payload["resources"] = {"max_wallclock_seconds": walltime}
+        response = client.post("/api/v1/runs", headers=AUTH, json=payload)
+    assert response.status_code == 202, response.text
+    assert len(service.calls) == 1
+    assert service.calls[0][2] == {
+        "num_machines": 1, "num_mpiprocs_per_machine": 1,
+        "num_cores_per_mpiproc": 12, "max_memory_kb": 34603008,
+        "max_wallclock_seconds": 1800 if walltime is None else 1200,
+    }
+    assert service.calls[0][0] == raw
+    assert hashlib.sha256(service.calls[0][0].encode()).digest() == hashlib.sha256(
+        raw.encode()
+    ).digest()
+
+
+@pytest.mark.parametrize("resources", [
+    {"num_cores_per_mpiproc": 1}, {"max_memory_kb": 4194304},
+    {"num_cores_per_mpiproc": 12, "max_memory_kb": 34603008},
+    {"max_wallclock_seconds": 1801}, {"num_machines": 2},
+])
+def test_automatic_override_or_ceiling_refusal_never_dispatches(service, resources):
+    settings = Settings(TOKEN, (CODE,), max_cores_per_process=12,
+                        max_memory_kb=34603008, max_wallclock_seconds=1800)
+    with TestClient(create_app(settings, service)) as client:
+        response = client.post("/api/v1/runs", headers=AUTH, json={
+            "plan": "{}", "code_uuid": CODE, "resources_mode": "automatic",
+            "resources": resources,
+        })
+    assert response.status_code == 422
+    assert not service.calls
+
+
+@pytest.mark.parametrize("mode", ["manual", "automatic"])
+@pytest.mark.parametrize("headers,code,status", [({}, CODE, 401), (AUTH, RUN, 403)])
+def test_resource_modes_preserve_auth_and_code_before_dispatch(
+    service, mode, headers, code, status,
+):
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), service)) as client:
+        response = client.post("/api/v1/runs", headers=headers, json={
+            "plan": "{}", "code_uuid": code, "resources_mode": mode,
+        })
+    assert response.status_code == status
+    assert not service.calls
+
+
+@pytest.mark.parametrize("mode", [None, "manual"])
+def test_manual_default_and_explicit_mode_keep_existing_resources(service, mode):
+    payload = {"plan": "{}", "code_uuid": CODE, "resources": {
+        "num_cores_per_mpiproc": 3, "max_memory_kb": 1024, "max_wallclock_seconds": 600,
+    }}
+    if mode is not None:
+        payload["resources_mode"] = mode
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), service)) as client:
+        assert client.post("/api/v1/runs", headers=AUTH, json=payload).status_code == 202
+    assert service.calls[0][2] == {
+        "num_machines": 1, "num_mpiprocs_per_machine": 1,
+        "num_cores_per_mpiproc": 3, "max_memory_kb": 1024, "max_wallclock_seconds": 600,
+    }
+
+
+def test_unavailable_advisory_is_not_submit_permission_or_veto(service, monkeypatch):
+    from qcl_negf_api.api import Configurator
+
+    monkeypatch.setattr(Configurator, "availability", lambda self: {
+        "available": False, "catalog_source_id": None, "reason": "unavailable",
+    })
+    attempts = []
+    admitted = service.submit_plan
+
+    def owner(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 2:
+            raise ValueError("Release gate closed")
+        return admitted(*args, **kwargs)
+
+    service.submit_plan = owner
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), service)) as client:
+        config = client.get("/api/v1/config", headers=AUTH).json()
+        assert config["configurator"]["available"] is False
+        payload = {"plan": "{}", "code_uuid": CODE, "resources_mode": "automatic"}
+        assert client.post("/api/v1/runs", headers=AUTH, json=payload).status_code == 202
+        assert len(attempts) == len(service.calls) == 1
+        response = client.post("/api/v1/runs", headers=AUTH, json=payload)
+        assert response.status_code == 422 and "Release gate closed" in response.text
+    assert len(attempts) == 2 and len(service.calls) == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"resources_mode": "optimized"}, {"resources_mode": None},
+    {"resources_mode": "manual", "resources": {"num_cores_per_mpiproc": 13}},
+    {"resources_mode": "manual", "resources": {"max_memory_kb": 34603009}},
+])
+def test_resource_mode_schema_and_manual_caps_still_refuse(service, change):
+    settings = Settings(TOKEN, (CODE,), max_cores_per_process=12, max_memory_kb=34603008)
+    with TestClient(create_app(settings, service)) as client:
+        response = client.post("/api/v1/runs", headers=AUTH, json={
+            "plan": "{}", "code_uuid": CODE, **change,
+        })
+    assert response.status_code == 422 and not service.calls

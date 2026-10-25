@@ -101,6 +101,7 @@ class Submission(BaseModel):
     plan: str = Field(min_length=2)
     code_uuid: UUID = Field(strict=False)
     label: str = Field(default="", max_length=120)
+    resources_mode: Literal["manual", "automatic"] = "manual"
     resources: Resources = Field(default_factory=Resources)
 
 
@@ -607,6 +608,17 @@ def create_app(settings: Settings | None = None, service: Any = None,
             "codes": settings.allowed_codes,
             "profile": settings.profile,
             "defaults": resource_defaults,
+            "ordinary_resources": {
+                "request_selection": "configured_request_ceiling",
+                "allocation_authority": "slurm",
+                "availability": "not_measured",
+                "forecast": "advisory",
+                "runtime_overhead": "unknown",
+                "reserve": "from_frozen_runner_policy",
+                "confidence": "uncalibrated",
+                "allocated_cpus": "not_measured",
+                "allocated_memory": "not_measured",
+            },
             "limits": {
                 "num_machines": settings.max_machines,
                 "num_mpiprocs_per_machine": settings.max_processes_per_machine,
@@ -662,6 +674,15 @@ def create_app(settings: Settings | None = None, service: Any = None,
         for key, value in resource_defaults.items():
             if key not in submission.resources.model_fields_set:
                 resources[key] = value
+        if submission.resources_mode == "automatic":
+            if {"num_cores_per_mpiproc", "max_memory_kb"} & submission.resources.model_fields_set:
+                raise HTTPException(422, "Automatic mode forbids client CPU/RAM overrides")
+            resources.update(
+                num_machines=1,
+                num_mpiprocs_per_machine=1,
+                num_cores_per_mpiproc=settings.max_cores_per_process,
+                max_memory_kb=settings.max_memory_kb,
+            )
         limits = {
             "num_machines": settings.max_machines,
             "num_mpiprocs_per_machine": settings.max_processes_per_machine,

@@ -35,6 +35,12 @@ export interface DocumentationAvailability {
   journeys: { researcher: string | null; developer: string | null; operator: string | null };
 }
 export interface Config {
+  ordinary_resources?: {
+    request_selection: 'configured_request_ceiling'; allocation_authority: 'slurm';
+    availability: 'not_measured'; forecast: 'advisory'; runtime_overhead: 'unknown';
+    reserve: 'from_frozen_runner_policy'; confidence: 'uncalibrated';
+    allocated_cpus: 'not_measured'; allocated_memory: 'not_measured';
+  };
   configurator?: {available: boolean; catalog_source_id: string | null; reason: string | null; planner_version?: string | null; planner_source_id?: string | null};
   documentation?: DocumentationAvailability;
   defaults: Resources;
@@ -42,6 +48,34 @@ export interface Config {
   codes: string[];
   limits: Resources & { plan_bytes: number; artifact_bytes: number };
   exports: { disk_bytes: number; ttl_seconds: number };
+}
+export type ResourcesMode = 'manual' | 'automatic';
+/** Serialize request intent only; the server owns the automatic CPU/RAM selection. */
+export function submissionResources(mode: ResourcesMode, resources: Resources): Partial<Resources> {
+  return mode === 'automatic'
+    ? {max_wallclock_seconds: resources.max_wallclock_seconds} : {...resources};
+}
+/** Manual retains the old strict server body; automatic requires advertised support. */
+export function ordinarySubmission(mode: ResourcesMode, config: Config | null,
+    request: {plan: string; code_uuid: string; resources: Resources; label: string}) {
+  if (mode === 'automatic' && (!config || !configuredRequest(config)))
+    throw new Error('Configured automatic request ceilings are unavailable');
+  return {...request, resources: submissionResources(mode, request.resources),
+    ...(mode === 'automatic' ? {resources_mode: 'automatic' as const} : {})};
+}
+/** Configured ceilings are not a worker inventory or a measured allocation. */
+export function configuredRequest(config: Config): Omit<Resources, 'max_wallclock_seconds'> | null {
+  const capability = config.ordinary_resources;
+  if (!capability || capability.request_selection !== 'configured_request_ceiling' ||
+      capability.allocation_authority !== 'slurm' || capability.availability !== 'not_measured' ||
+      capability.forecast !== 'advisory' || capability.runtime_overhead !== 'unknown' ||
+      capability.reserve !== 'from_frozen_runner_policy' || capability.confidence !== 'uncalibrated' ||
+      capability.allocated_cpus !== 'not_measured' || capability.allocated_memory !== 'not_measured' ||
+      ![config.limits.num_cores_per_mpiproc, config.limits.max_memory_kb].every(
+        value => Number.isSafeInteger(value) && value > 0)) return null;
+  return {num_machines: 1, num_mpiprocs_per_machine: 1,
+    num_cores_per_mpiproc: config.limits.num_cores_per_mpiproc,
+    max_memory_kb: config.limits.max_memory_kb};
 }
 export interface Artifact {
   execution_id: string;

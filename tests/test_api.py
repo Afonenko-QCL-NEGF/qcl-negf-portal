@@ -918,3 +918,33 @@ def test_mutation_fence_headers_identify_new_refusal_and_original_unknown(agent_
     assert response.headers["x-qcl-unresolved-operation-id"] == original
     assert response.headers["x-qcl-operation-outcome"] == "not_started"
     assert original in response.json()["detail"]
+
+
+def test_run_structure_passthrough_requires_auth(service):
+    """The existing detail GET remains authenticated and passes exact DTO fields."""
+    projection = {
+        "status": "available", "root": {"kind": "study", "definition_id": "d1"},
+        "inclusions": [{"id": "i1", "parent_id": None, "definition_id": "d1",
+                        "label": "One", "path": ["d1"], "execution_ids": ["e1"]}],
+        "executions": [{"id": "e1", "definition_id": "d1", "variant_id": "v1",
+                        "label": "One", "operation": "transport", "point_ids": ["p1"],
+                        "voltage_mode": "independent"}],
+        "points": [{"id": "p1", "execution_id": "e1", "branch": "T1", "order": 1,
+                    "initialization": "cold", "predecessor_id": None,
+                    "temperature_K": 70.0, "voltage_per_period_V": 0.056}],
+    }
+    original = service.get_run(RUN)
+    expected = {**original, "plan_fingerprint": "f" * 64, "plan_structure": projection,
+                "children": [{"uuid": CODE, "execution_id": "e1", "attempt": 2,
+                              "process_state": "finished", "exit_status": 0}]}
+    reads = []
+    def get_run(identifier):
+        reads.append(identifier)
+        return expected
+    service.get_run = get_run
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), service)) as client:
+        assert client.get(f"/api/v1/runs/{RUN}").status_code == 401
+        assert reads == []
+        response = client.get(f"/api/v1/runs/{RUN}", headers=AUTH)
+    assert response.status_code == 200 and response.json() == expected
+    assert reads == [RUN]

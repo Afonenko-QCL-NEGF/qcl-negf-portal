@@ -25,6 +25,7 @@ import {
   type Run,
 } from "./api";
 import { PublishedReference, RunModelHelp } from "./model-help";
+import { RunStructure } from "./run-structure";
 import "./style.css";
 
 function State({ run }: { run: Run }) {
@@ -620,6 +621,7 @@ function App() {
                         Request cancellation
                       </button>
                     )}
+                    <RunStructure key={detail.uuid} run={detail} />
                     {detail.children && detail.children.length > 0 && (
                       <>
                         <h4>Executions</h4>

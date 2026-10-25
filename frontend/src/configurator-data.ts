@@ -1,4 +1,6 @@
 import {ApiError} from './api.ts';
+import {readStructureEditor} from './structure-editor-data.ts';
+import type {StructureCapability} from './structure-editor-data.ts';
 
 export interface CatalogTemplate {
   id: string; name: string; study: string; study_sha256: string; description: string;
@@ -7,6 +9,7 @@ export interface CatalogTemplate {
 }
 export interface Catalog {status: 'available'; catalog_source_id: string; templates: CatalogTemplate[]}
 export interface Preview {
+  structure_editor?: StructureCapability;
   status: 'available'; draft_sha256: string; semantic_draft_sha256: string;
   catalog_source_id: string; template: CatalogTemplate; draft_yaml: string;
   short_form: {lossless: boolean; reason: string | null};
@@ -54,6 +57,7 @@ export function readPreview(value:unknown,source:string,id:string):Preview {
       typeof value.plan!=='string'||!value.plan||typeof value.draft_yaml!=='string'||!object(value.short_form)||typeof value.short_form.lossless!=='boolean'|| !(value.short_form.reason===null||typeof value.short_form.reason==='string')||
       !['variant_diffs','resolved_inputs','effective_defaults'].every(k=>Array.isArray(value[k]))||value.default_rule_sources===undefined||value.estimates===undefined||
       !object(value.counts)||!['points','executions'].every(k=>Number.isSafeInteger((value.counts as Record<string,unknown>)[k])&&Number((value.counts as Record<string,unknown>)[k])>=0))throw new Error('Некорректный или устаревший preview');
+  if(value.structure_editor!==undefined)readStructureEditor(value.structure_editor,{catalog_source_id:source,template_id:id,template_sha256:value.template.study_sha256,model:value.template.model});
   return value as unknown as Preview;
 }
 export function makeRequest(mode:'form'|'yaml',id:string,source:string,fields:FormFields,yaml:string) {

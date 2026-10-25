@@ -1,6 +1,8 @@
 import {useEffect, useRef, useState} from 'react';
 import {api, errorMessage} from './api.ts';
 import {PreviewSession, makeNumericalVariant, makeRequest, readCatalog, readPreview, verifyPlan} from './configurator-data.ts';
+import {StructureEditor} from './structure-editor.tsx';
+import {StructureDraftStore,activeVariant,draftToInputs,makeStructureVariant,readStructureEditor} from './structure-editor-data.ts';
 import type {Catalog, CatalogTemplate, FormFields, PlanSelection, Preview} from './configurator-data.ts';
 
 function ReadOnly({title,value}:{title:string;value:unknown}) {
@@ -30,6 +32,7 @@ export function ConfiguratorPreview({preview}:{preview:Preview}) {
     <p>Отсутствующий origin/history остаётся unknown; null означает отсутствие значения. UI не выводит источник сравнением с defaults.</p>
     <ReadOnly title="Оценки ресурсов / нижняя граница output (не admission)" value={preview.estimates}/>
     <p>Estimates не являются измерением RAM/CPU, свежим admission или разрешением ресурсов. Запрашиваемые ресурсы подтверждаются отдельно в существующей форме отправки.</p>
+    <ReadOnly title="Validated structure_editor Runner: canonical inputs / geometry / bindings (не quantum solve)" value={preview.structure_editor}/>
     <ReadOnly title="Runner short_form projection" value={preview.short_form}/>
     <details><summary>Canonical semantic YAML Runner (read-only)</summary><pre>{preview.draft_yaml}</pre></details>
     <details><summary>Exact frozen plan: все inclusions / executions / operations / variants / points / axes / explicit predecessors (read-only)</summary><pre>{preview.plan}</pre></details>
@@ -44,7 +47,10 @@ export function Configurator({token,context,availability,onPlan}:{token:string;c
   const [mode,setMode]=useState<'form'|'yaml'>('form'),[yaml,setYaml]=useState('');
   const [temperature,setTemperature]=useState(''),[voltage,setVoltage]=useState('');
   const [voltageMode,setVoltageMode]=useState(''),[coupling,setCoupling]=useState('');
-  const [variant,setVariant]=useState(false),[variantId,setVariantId]=useState('');
+  const [variantEditor,setVariantEditor]=useState<'none'|'numerical'|'structure'>('none'),[variantId,setVariantId]=useState('');
+  const [structureVariantId,setStructureVariantId]=useState('');
+  const structure=useRef(new StructureDraftStore()),templateVariantIds=useRef<string[]>(['baseline']);
+  const [,bumpStructure]=useState(0);
   const [comparison,setComparison]=useState(''),[paths,setPaths]=useState(''),[numerical,setNumerical]=useState<Record<string,string>>({});
   const [storedPreview,setPreview]=useState<Preview|null>(null),[previewContext,setPreviewContext]=useState(''),[reviewed,setReviewed]=useState(false);
   const [busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[error,setError]=useState('');
@@ -53,6 +59,9 @@ export function Configurator({token,context,availability,onPlan}:{token:string;c
   const currentContext=useRef(context);currentContext.current=context;
   const currentToken=useRef(token);currentToken.current=token;
   const selected=catalog?.templates.find(t=>t.id===id);
+  const structureKey=JSON.stringify([token,catalog?.catalog_source_id,selected?.id,selected?.study_sha256,selected?.model]);
+  const previousStructureRevision=structure.current.revision;structure.current.setContext(structureKey);
+  if(structure.current.revision!==previousStructureRevision)templateVariantIds.current=['baseline'];
   const preview=previewContext===context?storedPreview:null;
   function invalidate(){session.current.invalidate();fileGeneration.current++;setPreview(null);setReviewed(false);setError('');onPlan(null);}
   useEffect(()=>{
@@ -69,7 +78,8 @@ export function Configurator({token,context,availability,onPlan}:{token:string;c
   async function showPreview(){
     if(previewLatch.current||!catalog||!selected)return;
     invalidate();previewLatch.current=true;setBusy(true);
-    const g=session.current.begin(),snapshot=context,auth=token;
+    const g=session.current.begin(),snapshot=context,auth=token,sourceRevision=structure.current.revision;
+    let requestedVariantId:string|undefined;
     await session.current.receive(g,async()=>{
       const fields:FormFields={};
       if(mode==='form') {
@@ -77,12 +87,22 @@ export function Configurator({token,context,availability,onPlan}:{token:string;c
         if(voltage!=='')fields.voltage_per_period_mV=Number(voltage);
         if(voltageMode!=='')fields.voltage_mode=voltageMode as 'independent'|'strict';
         if(coupling!=='')fields.scba_to_poisson=coupling;
-        if(variant)fields.variant=makeNumericalVariant(variantId,comparison,paths,numerical);
+        const active=activeVariant(variantEditor,()=>{requestedVariantId=variantId;return makeNumericalVariant(variantId,comparison,paths,numerical);},()=>{
+          const bound=structure.current.bound;
+          if(!bound)throw new Error('Нужен canonical structure DTO: сначала preview без нового variant, затем явно выберите execution.');
+          requestedVariantId=structureVariantId;return makeStructureVariant(structureVariantId,draftToInputs(bound.draft),templateVariantIds.current);
+        });
+        if(active!==undefined)fields.variant=active;
       }
       const request=makeRequest(mode,id,catalog.catalog_source_id,fields,yaml);
       const value=readPreview(await api<unknown>(token,'/configurator/preview',request),catalog.catalog_source_id,id);
       await verifyPlan(value.plan,value.plan_sha256);return value;
-    },value=>{if(snapshot===currentContext.current&&auth===currentToken.current){setPreviewContext(snapshot);setPreview(value);}},err=>{if(snapshot===currentContext.current&&auth===currentToken.current)setError(errorMessage(err));});
+    },value=>{if(snapshot===currentContext.current&&auth===currentToken.current&&sourceRevision===structure.current.revision){
+      const capability=readStructureEditor(value.structure_editor,{catalog_source_id:catalog.catalog_source_id,template_id:id,template_sha256:selected.study_sha256,model:selected.model});
+      structure.current.offer(capability);
+      if(capability.status==='available')templateVariantIds.current=[...new Set(capability.executions.map(e=>e.variant_id).filter(v=>v!==requestedVariantId))];
+      setPreviewContext(snapshot);setPreview(value);
+    }},err=>{if(snapshot===currentContext.current&&auth===currentToken.current)setError(errorMessage(err));});
     previewLatch.current=false;setBusy(false);
   }
   async function readYaml(file:File|undefined){
@@ -110,14 +130,15 @@ export function Configurator({token,context,availability,onPlan}:{token:string;c
       <label>Задача / template<select value={id} disabled={busy} onChange={e=>{invalidate();setId(e.target.value);}}>{catalog.templates.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
       {selected&&<Identity template={selected}/>}
       <div className="configurator-actions"><button type="button" aria-pressed={mode==='form'} onClick={()=>switchMode('form')}>Короткая форма</button><button type="button" aria-pressed={mode==='yaml'} onClick={()=>switchMode('yaml')}>Полный YAML expert</button>
-        <button type="button" onClick={()=>{invalidate();setMode('form');setYaml('');setTemperature('');setVoltage('');setVoltageMode('');setCoupling('');setVariant(false);setVariantId('');setComparison('');setPaths('');setNumerical({});}}>Явно сбросить draft к template</button></div>
+        <button type="button" onClick={()=>{invalidate();setMode('form');setYaml('');setTemperature('');setVoltage('');setVoltageMode('');setCoupling('');setVariantEditor('none');setVariantId('');setStructureVariantId('');structure.current.reset();bumpStructure(v=>v+1);setComparison('');setPaths('');setNumerical({});}}>Явно сбросить draft к template</button></div>
       {mode==='form'?<div className="form-grid">
         <label>T (K), пусто = template<input type="number" step="any" value={temperature} onChange={e=>{invalidate();setTemperature(e.target.value);}}/></label>
         <label>V/period (mV), пусто = template<input type="number" step="any" value={voltage} onChange={e=>{invalidate();setVoltage(e.target.value);}}/></label>
         <label>Voltage mode<select value={voltageMode} onChange={e=>{invalidate();setVoltageMode(e.target.value);}}><option value="">Из template</option><option value="independent">independent</option><option value="strict">strict</option></select></label>
         <label>scba_to_poisson, пусто = template<input value={coupling} onChange={e=>{invalidate();setCoupling(e.target.value);}} placeholder="Existing Runner policy name"/></label>
-        <label className="wide"><input type="checkbox" checked={variant} onChange={e=>{invalidate();setVariant(e.target.checked);}}/> Добавить один explicit variant (existing study grammar)</label>
-        {variant&&<>
+        <label className="wide">Активный variant editor<select value={variantEditor} onChange={e=>{invalidate();setVariantEditor(e.target.value as 'none'|'numerical'|'structure');}}><option value="none">Без нового variant</option><option value="numerical">Numerical counts</option><option value="structure">Structure / physical_parameter</option></select></label>
+        <p className="wide">Отправляется ровно выбранный editor: {variantEditor}. Буферы numerical и structure сохраняются при переключении. Combined expert variant задаётся полным YAML.</p>
+        {variantEditor==='numerical'&&<>
           <label>Новый variant ID<input value={variantId} onChange={e=>{invalidate();setVariantId(e.target.value);}}/></label>
           <label>comparison_kind<input value={comparison} onChange={e=>{invalidate();setComparison(e.target.value);}}/></label>
           <label className="wide">controlled_paths: один existing path на строку<textarea value={paths} onChange={e=>{invalidate();setPaths(e.target.value);}}/></label>
@@ -125,6 +146,11 @@ export function Configurator({token,context,availability,onPlan}:{token:string;c
           <p className="wide">Другие explicit overrides доступны в полном YAML expert. Форма добавляет только указанные numerical counts; controlled_paths и comparison_kind задаются явно.</p>
           <p className="wide">Scope, единицы и допустимость отличий проверяет Runner. Сетка и physics автоматически не сокращаются.</p>
         </>}
+        {variantEditor==='structure'&&<div className="wide"><label>Новый structure variant ID<input value={structureVariantId} onChange={e=>{invalidate();setStructureVariantId(e.target.value);}}/></label>
+          <StructureEditor key={structure.current.revision} capability={structure.current.latest} bound={structure.current.bound}
+            onSelect={executionId=>{invalidate();structure.current.select(executionId);bumpStructure(v=>v+1);}}
+            onEdit={draft=>{invalidate();structure.current.edit(draft);bumpStructure(v=>v+1);}}/>
+        </div>}
       </div>:<>
         <p>Полный qcl-negf-study-v2, включая configuration.overrides, variants, axes и policies. Original UTF-8 текст хранится без нормализации. Unsupported input получает явный отказ Runner.</p>
         <label>Original authored YAML<input type="file" accept=".yaml,.yml,text/yaml" onChange={e=>void readYaml(e.target.files?.[0])}/><textarea rows={18} value={yaml} onChange={e=>{invalidate();setYaml(e.target.value);}}/></label>

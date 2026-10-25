@@ -8,10 +8,20 @@ import ts from 'typescript';
 // The locked compiler lowers this display module only. No browser or new DOM stack.
 const filename=new URL('../src/configurator.tsx',import.meta.url);
 const source=await readFile(filename,'utf8');
-let output=ts.transpileModule(source,{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;
-for(const specifier of ['react','react/jsx-runtime','./api.ts','./configurator-data.ts']){
-  const resolved=specifier.startsWith('.')?new URL(specifier,filename).href:import.meta.resolve(specifier);
-  output=output.replaceAll(`"${specifier}"`,JSON.stringify(resolved)).replaceAll(`'${specifier}'`,JSON.stringify(resolved));
+const editorFile=new URL('../src/structure-editor.tsx',import.meta.url);
+const editorSource=await readFile(editorFile,'utf8');
+const lower=(source:string,fileName:string)=>{
+ const result=ts.transpileModule(source,{fileName,reportDiagnostics:true,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}});
+ assert.deepEqual((result.diagnostics??[]).filter(d=>d.category===ts.DiagnosticCategory.Error).map(d=>ts.flattenDiagnosticMessageText(d.messageText,'\n')),[],'Display TSX must parse before SSR');return result.outputText;
+};
+const rewrite=(code:string,specifier:string,target:string)=>code.replaceAll(`"${specifier}"`,JSON.stringify(target)).replaceAll(`'${specifier}'`,JSON.stringify(target));
+let editorOutput=lower(editorSource,editorFile.pathname);
+for(const specifier of ['react','react/jsx-runtime','./structure-editor-data.ts'])editorOutput=rewrite(editorOutput,specifier,specifier.startsWith('.')?new URL(specifier,editorFile).href:import.meta.resolve(specifier));
+const editorUrl=`data:text/javascript;base64,${Buffer.from(editorOutput).toString('base64')}`;
+let output=lower(source,filename.pathname);
+for(const specifier of ['react','react/jsx-runtime','./api.ts','./configurator-data.ts','./structure-editor-data.ts','./structure-editor.tsx']){
+ const resolved=specifier==='./structure-editor.tsx'?editorUrl:specifier.startsWith('.')?new URL(specifier,filename).href:import.meta.resolve(specifier);
+ output=rewrite(output,specifier,resolved);
 }
 const ui=await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
 const hash='a'.repeat(64);

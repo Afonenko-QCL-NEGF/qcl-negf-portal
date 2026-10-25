@@ -276,3 +276,34 @@ This source slice does not configure/resolve scientific plans, create variants,
 compute new reports, run solvers, or establish native persistence/browser/science
 acceptance. The fake-ORM/API/actor/UI controls and isolated SQLite persistence
 check require their separately booked prepared-environment gates.
+
+## Bounded scientific configurator
+
+The submission panel also offers a short template form, one explicit controlled
+variant, and the complete `qcl-negf-study-v2` YAML editor. The authenticated
+`GET /api/v1/configurator/catalog` and explicit
+`POST /api/v1/configurator/preview` use the configured Runner resolver. Empty
+form fields retain the template; the browser supplies no scientific defaults.
+YAML is authoritative and can be downloaded with its original text. Returning
+to the short form requires an explicit draft reset when YAML cannot be preserved.
+
+Preview shows exact Research protocol version/file hashes, planned points and
+operations, variant overrides, complete Runner used/default/input projections
+including per-point sections, and owning rule sources. Missing runtime identity
+or input origin remains unknown. Resource estimates are separate from resource
+admission and scientific acceptance. Large integer metadata is displayed using
+Runner's lossless decimal tag; frozen plan bytes are never reformatted.
+
+Review the preview, confirm the selected Code/resources/label, and explicitly
+transfer its exact frozen plan to the existing submit form. Submission checks its
+SHA-256 and sends the original string. Draft, template, source, Code, resource or
+label changes invalidate that review; no automatic submit or retry occurs.
+Unknown submission outcomes retain an in-memory mutation fence with operation
+diagnostics. Inspect inventory with the operator before any further write.
+After a known successful submit, the existing research-card action can explicitly
+attach the exact run UUID. No card association is inferred from a label.
+
+Unavailable planner/catalog configuration leaves raw plan upload and historical
+run reads available. Runtime availability comes from `/api/v1/config`; an absent
+planner version is shown as unknown. This interface does not alter the active
+SCI4 run, install a planner, grant resources, or establish scientific acceptance.

@@ -35,6 +35,7 @@ export interface DocumentationAvailability {
   journeys: { researcher: string | null; developer: string | null; operator: string | null };
 }
 export interface Config {
+  configurator?: {available: boolean; catalog_source_id: string | null; reason: string | null; planner_version?: string | null; planner_source_id?: string | null};
   documentation?: DocumentationAvailability;
   defaults: Resources;
   profile: string;

@@ -8,6 +8,7 @@ import {
 import { createRoot } from "react-dom/client";
 import {
   api,
+  ApiError,
   download,
   downloadExport,
   prepareExport,
@@ -29,6 +30,9 @@ import {
 import { PublishedReference, RunModelHelp } from "./model-help";
 import { RunStructure } from "./run-structure";
 import { ResearchCards } from "./research-cards";
+import { Configurator } from "./configurator";
+import { SubmissionGate, mutationUncertain, verifyPlan } from "./configurator-data.ts";
+import type { PlanSelection } from "./configurator-data.ts";
 import "./style.css";
 
 function State({ run }: { run: Run }) {
@@ -218,6 +222,8 @@ function AgentReportsPanel({ token, uuid }: { token: string; uuid: string }) {
 
 function App() {
   const [token, setToken] = useState("");
+  const activeToken = useRef(token);
+  activeToken.current = token;
   const [draftToken, setDraftToken] = useState("");
   const [config, setConfig] = useState<Config | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -231,6 +237,31 @@ function App() {
   const [showSubmit, setShowSubmit] = useState(false);
   const [plan, setPlan] = useState<string | null>(null);
   const [planName, setPlanName] = useState("");
+  const submissionGate = useRef(new SubmissionGate());
+  const planIdentity = useRef<PlanSelection | null>(null);
+  const planOrigin = useRef<'raw' | 'configurator' | null>(null);
+  const uploadGeneration = useRef(0);
+  const [planInputRevision, setPlanInputRevision] = useState(0);
+  const [uncertainSubmission, setUncertainSubmission] = useState("");
+  const acceptConfiguredPlan = useCallback((value: PlanSelection | null) => {
+    if (!value && planOrigin.current !== 'configurator') return;
+    uploadGeneration.current++;
+    planOrigin.current = value ? 'configurator' : null;
+    planIdentity.current = value;
+    submissionGate.current.select(value);
+    setPlan(value?.plan ?? null);
+    setPlanName(value ? `Runner preview · SHA-256 ${value.sha256}` : "");
+  }, []);
+  function submissionContextChanged() {
+    // Synchronous invalidation closes the window before the child's effect.
+    uploadGeneration.current++;
+    if (planOrigin.current === 'configurator') acceptConfiguredPlan(null);
+    else if (planIdentity.current) {
+      const replacement = {...planIdentity.current};
+      planIdentity.current = replacement;
+      submissionGate.current.select(replacement);
+    }
+  }
   const refreshSequence = useRef(0);
   const selectedRun = useRef<string | null>(null);
   const [code, setCode] = useState("");
@@ -289,6 +320,11 @@ function App() {
   }
 
   async function readPlan(file: File | undefined) {
+    const generation = ++uploadGeneration.current;
+    setPlanInputRevision(v => v + 1);
+    planOrigin.current = 'raw';
+    planIdentity.current = null;
+    submissionGate.current.select(null);
     setPlan(null);
     setPlanName("");
     setError("");
@@ -300,37 +336,59 @@ function App() {
       const value: unknown = JSON.parse(source);
       if (!value || Array.isArray(value) || typeof value !== "object")
         throw new Error("Plan must be a JSON object.");
+      if (generation !== uploadGeneration.current) return;
+      const selection = {plan: source};
+      planIdentity.current = selection;
+      submissionGate.current.select(selection);
       setPlan(source);
       setPlanName(file.name);
     } catch (err) {
-      setError(errorMessage(err));
+      if (generation === uploadGeneration.current) setError(errorMessage(err));
     }
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!plan) return;
+    const selection = submissionGate.current.begin();
+    if (!selection || uncertainSubmission) return;
     setBusy(true);
     setError("");
+    const submittedToken = token;
+    const submission = {plan: selection.plan, code_uuid: code, resources: {...resources}, label};
+    let dispatched = false, uncertain = false;
     try {
-      const run = await api<Run>(token, "/runs", {
-        plan,
-        code_uuid: code,
-        resources,
-        label,
-      });
+      if (selection.sha256) await verifyPlan(selection.plan, selection.sha256);
+      if (!submissionGate.current.current(selection)) return;
+      dispatched = true;
+      const run = await api<Run>(token, "/runs", submission);
+      if (!run || typeof run.uuid !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?![\s\S])/.test(run.uuid))
+        throw new Error('Submit response has no known run UUID');
+      dispatched = false;
+      if (submittedToken !== activeToken.current) return;
       selectedRun.current = run.uuid;
       setSelected(run.uuid);
       setDetail(null);
       setOffset(0);
       setShowSubmit(false);
       setPlan(null);
+      planIdentity.current = null;
+      planOrigin.current = null;
+      submissionGate.current.select(null);
+      uploadGeneration.current++;
       setPlanName("");
       setLabel("");
       await refresh();
     } catch (err) {
+      uncertain = dispatched && mutationUncertain(err);
+      if (uncertain) {
+        const diagnostic = err instanceof ApiError
+          ? `operation=${err.operationId ?? 'unknown'}; outcome=${err.outcome ?? 'unknown'}; unresolved=${err.unresolvedOperationId ?? 'unknown'}`
+          : 'Transport outcome unknown';
+        setUncertainSubmission(`Исход отправки неизвестен. Повтор POST запрещён; проверьте inventory и diagnostics с оператором. ${diagnostic}`);
+      }
       setError(errorMessage(err));
     } finally {
+      submissionGate.current.finish(uncertain);
       setBusy(false);
     }
   }
@@ -357,6 +415,10 @@ function App() {
 
   function logout() {
     refreshSequence.current += 1;
+    uploadGeneration.current++;
+    planIdentity.current = null;
+    planOrigin.current = null;
+    submissionGate.current.select(null);
     setToken("");
     setConfig(null);
     setRuns([]);
@@ -386,6 +448,7 @@ function App() {
         {token && config && (
           <PublishedReference documentation={config.documentation} />
         )}
+        {uncertainSubmission && <p role="alert" className="error">{uncertainSubmission}</p>}
         {error && (
           <div role="alert" className="error">
             <span>{error}</span>
@@ -456,6 +519,8 @@ function App() {
                   Generate the JSON plan with <code>qcl-negf plan CONFIG</code>.
                   Slurm allocates the requested resources for each execution.
                 </p>
+                <Configurator token={token} context={JSON.stringify({code, resources, label, planInputRevision})}
+                  availability={config.configurator} onPlan={acceptConfiguredPlan}/>
                 <form onSubmit={submit}>
                   <div className="form-grid">
                     <label>
@@ -466,7 +531,6 @@ function App() {
                         onChange={(event) =>
                           void readPlan(event.target.files?.[0])
                         }
-                        required
                       />
                     </label>
                     <label>
@@ -474,14 +538,14 @@ function App() {
                       <input
                         value={label}
                         maxLength={120}
-                        onChange={(event) => setLabel(event.target.value)}
+                        onChange={(event) => { submissionContextChanged(); setLabel(event.target.value); }}
                       />
                     </label>
                     <label className="wide">
                       Approved solver code
                       <select
                         value={code}
-                        onChange={(event) => setCode(event.target.value)}
+                        onChange={(event) => { submissionContextChanged(); setCode(event.target.value); }}
                       >
                         {config.codes.map((uuid) => (
                           <option key={uuid}>{uuid}</option>
@@ -510,12 +574,13 @@ function App() {
                           min={key === "max_wallclock_seconds" ? 60 : 1}
                           max={config.limits[key]}
                           value={resources[key]}
-                          onChange={(event) =>
+                          onChange={(event) => {
+                            submissionContextChanged();
                             setResources({
                               ...resources,
                               [key]: Number(event.target.value),
-                            })
-                          }
+                            });
+                          }}
                           required
                         />
                       </label>
@@ -525,7 +590,7 @@ function App() {
                     <span className="muted">
                       {planName || "Choose a frozen plan to continue."}
                     </span>
-                    <button className="primary" disabled={busy || !plan}>
+                    <button className="primary" disabled={busy || !plan || !!uncertainSubmission}>
                       {busy ? "Submitting…" : "Submit to AiiDA"}
                     </button>
                   </div>

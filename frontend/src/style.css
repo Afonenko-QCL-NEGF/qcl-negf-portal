@@ -496,3 +496,17 @@ footer {
 .card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .75rem 0; }
 .card-receipt { border: 1px solid #8b9caf; background: #f8fafc; padding: .75rem; }
 .research-cards :focus-visible { outline: 3px solid #1257ae; outline-offset: 2px; }
+
+.configurator { color-scheme: light; color: #172b45; background: #fff; border: 1px solid #a6b7cb; border-radius: 10px; padding: 1rem; margin-block: 1rem; }
+.configurator input, .configurator select, .configurator textarea { color: #172b45; background: #fff; border: 1px solid #8399b2; }
+.configurator label { display: grid; gap: .4rem; margin-block: .75rem; }
+.configurator input[type="checkbox"] { width: auto; justify-self: start; }
+.configurator textarea { box-sizing: border-box; width: 100%; min-height: 5rem; padding: .65rem; font-family: monospace; }
+.configurator pre { color: #172b45; background: #f3f7fc; padding: .8rem; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; }
+.configurator code, .configurator dd { overflow-wrap: anywhere; }
+.configurator details { border-top: 1px solid #cad6e5; margin-block: .7rem; padding-block: .6rem; }
+.configurator summary { cursor: pointer; color: #164b80; }
+.configurator-actions { display: flex; gap: .6rem; flex-wrap: wrap; margin-block: 1rem; }
+.configurator :is(button, input, select, textarea, summary):focus-visible { outline: 3px solid #2163c6; outline-offset: 3px; }
+.configurator-preview { background: #fafdff; border: 1px solid #b7c8da; padding: 1rem; margin-block: 1rem; }
+.configurator [role="alert"] { color: #8b1d2d; background: #fff1f2; }

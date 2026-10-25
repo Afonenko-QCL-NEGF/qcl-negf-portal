@@ -14,6 +14,8 @@ import {
   errorMessage,
   isTerminal,
   readableBytes,
+  refreshWorkflowView,
+  selectWorkflowRun,
   type Artifact,
   type AgentReport,
   type AgentReportReceipt,
@@ -26,6 +28,7 @@ import {
 } from "./api";
 import { PublishedReference, RunModelHelp } from "./model-help";
 import { RunStructure } from "./run-structure";
+import { ResearchCards } from "./research-cards";
 import "./style.css";
 
 function State({ run }: { run: Run }) {
@@ -229,6 +232,7 @@ function App() {
   const [plan, setPlan] = useState<string | null>(null);
   const [planName, setPlanName] = useState("");
   const refreshSequence = useRef(0);
+  const selectedRun = useRef<string | null>(null);
   const [code, setCode] = useState("");
   const [label, setLabel] = useState("");
   const [resources, setResources] = useState<Resources>({
@@ -239,30 +243,20 @@ function App() {
     max_memory_kb: 4194304,
   });
 
+  const selectRun = useCallback((uuid: string) => {
+    selectWorkflowRun(uuid, selectedRun, refreshSequence, () => {
+      setDetail(null); setReport([]); setArtifacts([]);
+    }, setSelected);
+  }, []);
+
   const refresh = useCallback(async () => {
     if (!token) return;
     const sequence = ++refreshSequence.current;
-    try {
-      const page = await api<{ runs: Run[] }>(
-        token,
-        `/runs?limit=25&offset=${offset}`,
-      );
-      if (sequence !== refreshSequence.current) return;
-      setRuns(page.runs);
-      if (selected) {
-        const [run, logs, files] = await Promise.all([
-          api<Run>(token, `/runs/${selected}`),
-          api<{ entries: ReportEntry[] }>(token, `/runs/${selected}/report`),
-          api<{ artifacts: Artifact[] }>(token, `/runs/${selected}/artifacts`),
-        ]);
-        if (sequence !== refreshSequence.current) return;
-        setDetail(run);
-        setReport(logs.entries);
-        setArtifacts(files.artifacts);
-      }
-    } catch (err) {
-      if (sequence === refreshSequence.current) setError(errorMessage(err));
-    }
+    await refreshWorkflowView(token, selectedRun.current, offset, () => {
+      if (sequence !== refreshSequence.current) return false;
+      return true;
+    }, {runs: setRuns, detail: setDetail, report: setReport,
+      artifacts: setArtifacts, error: setError});
   }, [token, selected, offset]);
 
   useEffect(() => {
@@ -325,6 +319,7 @@ function App() {
         resources,
         label,
       });
+      selectedRun.current = run.uuid;
       setSelected(run.uuid);
       setDetail(null);
       setOffset(0);
@@ -365,6 +360,7 @@ function App() {
     setToken("");
     setConfig(null);
     setRuns([]);
+    selectedRun.current = null;
     setSelected(null);
     setDetail(null);
     setArtifacts([]);
@@ -386,6 +382,7 @@ function App() {
         </div>
       </header>
       <main>
+        {token && <ResearchCards key={token} token={token} onSelectRun={selectRun} />}
         {token && config && (
           <PublishedReference documentation={config.documentation} />
         )}
@@ -550,12 +547,7 @@ function App() {
                   <button
                     key={run.uuid}
                     className={`run ${run.uuid === selected ? "selected" : ""}`}
-                    onClick={() => {
-                      setSelected(run.uuid);
-                      setDetail(null);
-                      setReport([]);
-                      setArtifacts([]);
-                    }}
+                    onClick={() => selectRun(run.uuid)}
                   >
                     <div>
                       <strong>{run.label || `Workflow ${run.pk}`}</strong>

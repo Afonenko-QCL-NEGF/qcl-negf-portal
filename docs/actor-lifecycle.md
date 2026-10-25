@@ -65,7 +65,7 @@ requested lease exits, затем проверяет STOPPING, затем выб
 5. `completed` close возможен только после всех lease exits, unload, shutdown
    async generators и loop close без ошибки. `stopping` не successful close.
 6. Unresolved mutation не разрешает новый provenance submit. В текущем
-   процессе закрывается admission всех трёх mutation operations; reads могут
+   процессе закрывается admission всех mutation operations; reads могут
    возобновиться после возврата owner. Никакого automatic reset/retry нет.
 7. Late result не меняет уже отправленный HTTP response и не публикует ready
    export после cancellation/stopping. Cleanup не удаляет leased files.
@@ -230,7 +230,9 @@ profile reload после constructor timeout. Несколько профиле
 Read group R = `list_runs`, `get_run`, `get_export_plan`, `get_export_selection`,
 `list_execution_artifacts`, `get_run_report`, `list_agent_reports`,
 `read_agent_report`, `list_artifacts`, `get_artifact_metadata`.
-Mutation group M = `submit_plan`, `kill_run`, `save_agent_report`.
+Mutation group M = `submit_plan`, `kill_run`, `save_agent_report`,
+`create_research_card`, `edit_research_card`, `attach_research_card_run`,
+`attach_research_card_report`.
 `cancel` в постановке означает exact existing operation `kill_run`.
 Других dynamic operations нет. Нельзя расширить allowlist через client name.
 
@@ -646,3 +648,17 @@ artifact-reader.closed либо export-entry.readers==0 assertions. Stalled acto
 `test_disconnect_releases_handle_exactly_once_after_backend_returns`.
 Fault fixtures не доказывают responsiveness настоящего AiiDA/NFS/backend,
 hard process exit, cancellation Slurm или physical acceptance.
+
+
+### Native research-card operations
+
+Card reads and writes use this same owner queue; no HTTP/threadpool ORM access.
+The eleven `research_card` service operations join OPERATIONS. The four card
+writes join M, including the queued dispatch recheck. Card/request UUIDs are not
+run locators: all card ActorReceipts have null run_uuid/calcjob_uuid/attempt.
+Known pre-store domain refusal is a returned DTO (`not_found`, `version_conflict`,
+`request_conflict`, `invalid_binding`, `unsupported_plan`), mapped by HTTP after
+return. It does not fence mutations. Any unexpected started constructor/store
+exception and a running deadline retain the existing unknown outcome and global
+fence. Readback returns stored evidence or not_found; absence is not no-effect.
+Neither late receipt nor readback resets the fence or permits automatic retry.

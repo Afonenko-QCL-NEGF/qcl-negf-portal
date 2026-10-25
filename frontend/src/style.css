@@ -486,3 +486,13 @@ footer {
 .run-structure td { background: #fff; color: #172b43; }
 .plan-table-scroll { overflow-x: auto; }
 .plan-inclusions { padding-inline-start: 1.25rem; }
+
+/* Native research metadata remains readable in the fixed light theme. */
+.research-cards { background: #fff; color: #172b3a; margin-bottom: 1.5rem; }
+.research-cards pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f3f6fa; color: #172b3a; padding: .75rem; }
+.research-cards code { overflow-wrap: anywhere; }
+.research-cards label { display: grid; gap: .3rem; margin: .75rem 0; }
+.research-cards textarea { min-height: 5rem; background: #fff; color: #172b3a; }
+.card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .75rem 0; }
+.card-receipt { border: 1px solid #8b9caf; background: #f8fafc; padding: .75rem; }
+.research-cards :focus-visible { outline: 3px solid #1257ae; outline-offset: 2px; }

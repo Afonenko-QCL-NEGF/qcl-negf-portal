@@ -240,3 +240,39 @@ workflow editor, physics or result derivation. Stage/variant forms, research
 card association, saved plots, resource admission and native browser acceptance
 remain separate work. Source fixtures and server rendering do not establish
 browser keyboard/theme/async-race acceptance or production activation.
+
+
+## Native research cards
+
+The light **Исследования** panel creates and edits canonical title/goal/question
+metadata as immutable native AiiDA file versions. History and exact original JSON
+downloads retain each version UUID/hash. A stable card UUID is its first native
+version UUID; identical text creates distinct cards. Existing frozen plans and
+scientific results are unchanged. Plain text preserves Markdown source and
+escapes author HTML. Scientific acceptance is independent of all card metadata.
+
+An explicit confirmation attaches the **whole** selected saved run with its
+frozen fingerprint and all variants/observed attempts, including failures.
+Reports are selected by exact anchor/report UUID and attached with their immutable
+hash. The AiiDA owner rechecks every used run's explicit membership and current
+frozen selectors before storing. Different card versions may compare runs within
+one stable card. Historical runs/reports without an explicit relation remain
+unassociated; labels, matching questions and `question_snapshot` infer nothing.
+Use the existing workflow view for variants, attempts and scientific summaries.
+
+Authenticated no-store `/api/v1/research-cards` exposes paginated heads, versions,
+file downloads, runs and analyses. Writes require a canonical client request UUID
+and exact pinned version/base. The strict JSON envelope carries the original
+card JSON as a string; Contracts validates its exact UTF-8 bytes (≤65536) before
+dispatch and again in the owner. Responses contain detached bounded receipts
+(≤1 MiB), never arrays. GET `/api/v1/research-card-requests/{request_uuid}` reads
+stored evidence. Same key/meaning replays; changed meaning conflicts. Known
+pre-store refusal is 404/409/422; known store is 201 and replay 200. Unexpected
+started write failure/deadline remains unknown with the existing actor mutation
+fence. The panel retains request/diagnostic IDs and offers explicit readback;
+not_found does not prove no effect, and readback does not unlock or retry writes.
+
+This source slice does not configure/resolve scientific plans, create variants,
+compute new reports, run solvers, or establish native persistence/browser/science
+acceptance. The fake-ORM/API/actor/UI controls and isolated SQLite persistence
+check require their separately booked prepared-environment gates.

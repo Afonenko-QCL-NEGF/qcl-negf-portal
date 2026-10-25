@@ -19,8 +19,16 @@ from .settings import ACTOR_DEFAULTS, Settings
 
 LOG = logging.getLogger(__name__)
 OWNER_GUARD = threading.Lock()
-MUTATIONS = frozenset({"submit_plan", "kill_run", "save_agent_report"})
-OPERATIONS = frozenset(
+CARD_OPERATIONS = frozenset({
+    "create_research_card", "edit_research_card", "list_research_cards",
+    "get_research_card", "list_research_card_versions", "read_research_card_version",
+    "attach_research_card_run", "list_research_card_runs",
+    "attach_research_card_report", "list_research_card_reports", "get_research_card_request",
+})
+MUTATIONS = frozenset({"submit_plan", "kill_run", "save_agent_report",
+    "create_research_card", "edit_research_card", "attach_research_card_run",
+    "attach_research_card_report"})
+OPERATIONS = CARD_OPERATIONS | frozenset(
     {
         "list_runs",
         "get_run",
@@ -211,14 +219,17 @@ class AiidaService:
             if message.name == "submit_plan"
             else (_uuid(message.args[0]) if message.args else None)
         )
+        card_operation = message.name in CARD_OPERATIONS
+        if card_operation:
+            run = None
         return ActorReceipt(
             message.operation_id,
             message.name,
             outcome,
             self._state,
             run,
-            _uuid(message.kwargs.get("calcjob_uuid")),
-            message.kwargs.get("attempt"),
+            None if card_operation else _uuid(message.kwargs.get("calcjob_uuid")),
+            None if card_operation else message.kwargs.get("attempt"),
             self._mutation_receipt.operation_id if self._mutation_receipt is not None else None,
         )
 

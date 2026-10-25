@@ -1013,3 +1013,153 @@ def test_queued_reader_close_cancels_unstarted_work_without_losing_other_leases(
             pass
         assert not blocker_thread.is_alive()
         assert not reader_started or not reader_thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "create_research_card",
+        "edit_research_card",
+        "attach_research_card_run",
+        "attach_research_card_report",
+    ],
+)
+def test_card_mutations_known_refusal_null_locators_and_post_store_fence(backend, operation):
+    plugin, events = backend
+    requests = []
+
+    def refused(*args, **kwargs):
+        requests.append((args, kwargs))
+        return {"status": "rejected", "reason": "version_conflict", "current_version_uuid": RUN}
+
+    setattr(plugin, operation, refused)
+    plugin.get_research_card_request = lambda *args: {"status": "not_found"}
+    actor = actor_module.AiidaService("example", settings=policy())
+    try:
+        assert getattr(actor, operation)(CODE) == {
+            "status": "rejected",
+            "reason": "version_conflict",
+            "current_version_uuid": RUN,
+        }
+        # Known returned rejection leaves admission open, even with card UUID args.
+        assert getattr(actor, operation)(CODE)["status"] == "rejected"
+
+        def after_store(*args, **kwargs):
+            requests.append(("stored", args))
+            raise ValueError("fault after store")
+
+        setattr(plugin, operation, after_store)
+        with pytest.raises(actor_module.ActorOutcomeUnknown) as caught:
+            getattr(actor, operation)(CODE, calcjob_uuid=RUN, attempt=3)
+        receipt = caught.value.receipt
+        assert receipt.operation == operation and receipt.outcome == "unknown"
+        assert (receipt.run_uuid, receipt.calcjob_uuid, receipt.attempt) == (None, None, None)
+        for name in actor_module.MUTATIONS:
+            with pytest.raises(actor_module.ActorUnavailable) as blocked:
+                getattr(actor, name)(CODE)
+            assert blocked.value.receipt.unresolved_operation_id == receipt.operation_id
+        assert actor.get_research_card_request(CODE) == {"status": "not_found"}
+        with pytest.raises(actor_module.ActorUnavailable):
+            getattr(actor, operation)(CODE)
+        assert len(requests) == 3
+    finally:
+        actor.close()
+
+
+def test_card_running_timeout_late_receipt_readback_does_not_unfence(backend):
+    plugin, events = backend
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+
+    def create(*args):
+        started.set()
+        calls.append(args)
+        assert release.wait(3)
+        finished.set()
+        return {"status": "stored", "kind": "version", "receipt": {"card_uuid": CODE}}
+
+    plugin.create_research_card = create
+    plugin.get_research_card_request = lambda *args: {
+        "status": "stored",
+        "kind": "version",
+        "receipt": {"card_uuid": CODE},
+    }
+    actor = actor_module.AiidaService("example", settings=policy())
+    try:
+        with pytest.raises(actor_module.ActorOutcomeUnknown) as caught:
+            actor.create_research_card(CODE, b"raw")
+        assert started.is_set() and caught.value.receipt.run_uuid is None
+        assert caught.value.receipt.outcome == "unknown"
+        release.set()
+        assert finished.wait(1)
+        # A queued read also establishes that owner returned and can read again.
+        deadline = time.monotonic() + 1
+        while actor._state == "blocked" and time.monotonic() < deadline:
+            threading.Event().wait(0.005)
+        assert actor.get_research_card_request(CODE)["status"] == "stored"
+        with pytest.raises(actor_module.ActorUnavailable):
+            actor.create_research_card(CODE, b"raw")
+        assert len(calls) == 1 and caught.value.receipt.outcome == "unknown"
+    finally:
+        release.set()
+        actor.close()
+
+
+def test_two_queued_card_edits_from_one_base_have_one_known_conflict(backend):
+    plugin, events = backend
+    entered, release = threading.Event(), threading.Event()
+    head = [CODE]
+    stored = []
+    results = []
+    errors = []
+
+    def edit(card, request, base, raw):
+        if not stored:
+            entered.set()
+            assert release.wait(2)
+        if base != head[0]:
+            return {
+                "status": "rejected",
+                "reason": "version_conflict",
+                "current_version_uuid": head[0],
+            }
+        head[0] = RUN
+        stored.append(request)
+        return {
+            "status": "stored",
+            "kind": "version",
+            "receipt": {"card_uuid": CODE, "version_uuid": RUN},
+        }
+
+    plugin.edit_research_card = edit
+    settings = Settings(
+        TOKEN, (CODE,), actor_call_timeout_seconds=2, actor_close_timeout_seconds=0.2
+    )
+    actor = actor_module.AiidaService("example", settings=settings)
+
+    def invoke(request):
+        try:
+            results.append(actor.edit_research_card(CODE, request, CODE, b"raw"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=invoke, args=("request-A",))
+    second = threading.Thread(target=invoke, args=("request-B",))
+    try:
+        first.start()
+        assert entered.wait(1)
+        second.start()
+        deadline = time.monotonic() + 1
+        while not actor._queue and time.monotonic() < deadline:
+            threading.Event().wait(0.005)
+        assert actor._queue
+        release.set()
+        first.join(1)
+        second.join(1)
+        assert not errors and sorted(r["status"] for r in results) == ["rejected", "stored"]
+        assert stored == ["request-A"] and actor._mutation_receipt is None
+    finally:
+        release.set()
+        first.join(1)
+        second.join(1)
+        actor.close()

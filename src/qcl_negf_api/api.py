@@ -797,6 +797,7 @@ def create_app(settings: Settings | None = None, service: Any = None,
     @app.get("/api/v1/runs/{run_uuid}/saved-results/sources", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/brief", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/manifest", dependencies=protected)
+    @app.get("/api/v1/runs/{run_uuid}/saved-results/diagnostics", dependencies=protected)
     async def saved_metadata(
         request: Request, run_uuid: UUID, execution_id: str | None = None,
         attempt: int | None = Query(None, ge=1), calcjob_uuid: UUID | None = None,
@@ -825,12 +826,16 @@ def create_app(settings: Settings | None = None, service: Any = None,
             "attempt": attempt, "calcjob_uuid": str(calcjob_uuid) if calcjob_uuid else None}, query)
 
     @app.post("/api/v1/runs/{run_uuid}/saved-results/slice", dependencies=protected)
+    @app.post("/api/v1/runs/{run_uuid}/saved-results/history", dependencies=protected)
     async def saved_slice(request: Request, run_uuid: UUID):
         try:
             from .saved_results import _json
             payload = _json(await request.body())
             allowed = {"execution_id", "attempt", "calcjob_uuid", "point_id",
                        "source_commit_sha256", "metadata_sha256", "view_id", "selection"}
+            operation = request.url.path.rsplit("/", 1)[1]
+            if operation == "history":
+                allowed = (allowed - {"view_id"}) | {"phase"}
             from .saved_nfs import provider as saved_provider
             if not isinstance(payload, dict):
                 raise SavedResultError("selection_required")
@@ -842,7 +847,7 @@ def create_app(settings: Settings | None = None, service: Any = None,
             return JSONResponse({"detail": {"code": "selection_required",
                 "reason": "Use only exact provenance and semantic native selection"}},422,
                 headers={"Cache-Control": "no-store"})
-        return await saved_call(request, run_uuid, "slice", selection, payload)
+        return await saved_call(request, run_uuid, operation, selection, payload)
 
     @app.get("/api/v1/runs/{run_uuid}/artifacts", dependencies=protected)
     def artifacts(request: Request, run_uuid: UUID) -> dict:

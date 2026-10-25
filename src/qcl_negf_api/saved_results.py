@@ -133,6 +133,77 @@ def _selection(value):
     return dict(value)
 
 
+def _diagnostic_artifacts(commit):
+    """Validate only the selected history closure; leave unrelated owners unopened."""
+    from qcl_negf_contracts.artifacts import Artifact, validate_commit
+
+    validate_commit({**commit, "artifacts": []})
+    rows = commit.get("artifacts")
+    if not isinstance(rows, list) or len(rows) > 4096:
+        raise SavedResultError("budget_exceeded")
+    bypath = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise SavedResultError("corrupt_result")
+        name = _path(row.get("path"))
+        if name in bypath:
+            raise SavedResultError("corrupt_result")
+        bypath[name] = row
+    owners = [row for row in rows if row.get("role") == "science.history"]
+    if len(owners) != 1:
+        return ()
+    owner = owners[0]
+    if (
+        owner.get("schema") != "qcl-negf-scientific-history-v4"
+        or owner.get("media_type") != "application/x-hdf5"
+    ):
+        raise SavedResultError("unsupported_contract")
+    selected = {}
+    pending = [owner["path"]]
+    while pending:
+        name = pending.pop()
+        if name in selected:
+            continue
+        if name not in bypath:
+            raise SavedResultError("corrupt_result")
+        artifact = Artifact.parse(bypath[name])
+        if name != owner["path"] and artifact.media_type != "application/json":
+            raise SavedResultError("unsupported_contract")
+        selected[name] = bypath[name]
+        pending.extend(artifact.dependencies)
+    return validate_commit({**commit, "artifacts": list(selected.values())})
+
+
+def _history_selection(phase, selection):
+    if phase not in ("scba", "outer") or not isinstance(selection, dict):
+        raise SavedResultError("selection_required")
+    if set(selection) != {"start", "stop", "step", "columns"}:
+        raise SavedResultError("selection_required")
+    if (
+        any(type(selection[k]) is not int for k in ("start", "stop", "step"))
+        or not 0 <= selection["start"] < selection["stop"]
+        or selection["step"] < 1
+    ):
+        raise SavedResultError("selection_required")
+    if (selection["stop"] - selection["start"] + selection["step"] - 1) // selection["step"] > 512:
+        raise SavedResultError("budget_exceeded")
+    columns = selection["columns"]
+    if (
+        not isinstance(columns, list)
+        or not 1 <= len(columns) <= 16
+        or any(
+            not isinstance(v, str)
+            or not 1 <= len(v) <= 128
+            or any(c in v for c in ("/", "\\", "\x00"))
+            or any(ord(c) < 32 for c in v)
+            or v in {"sequence", "iteration", "outer_iteration", "source_attempt"}
+            for v in columns
+        )
+        or len(set(columns)) != len(columns)
+    ):
+        raise SavedResultError("selection_required")
+
+
 def _brief(metadata, **kwargs):
     from qcl_negf_results.saved_views import brief_result
 
@@ -280,7 +351,7 @@ class SavedResults:
             check()
             return result
         source, query = provider(query)
-        if operation not in ("brief", "manifest", "slice"):
+        if operation not in ("brief", "manifest", "slice", "diagnostics", "history"):
             raise SavedResultError("unsupported_contract")
         allowed = (
             {"cursor"}
@@ -289,6 +360,8 @@ class SavedResults:
         )
         if operation == "slice":
             allowed |= {"view_id", "selection"}
+        if operation == "history":
+            allowed |= {"phase", "selection"}
         if set(query) - allowed:
             raise SavedResultError("selection_required")
         if query.get("cursor") is not None and (
@@ -325,6 +398,8 @@ class SavedResults:
                     or item["step"] < 1
                 ):
                     raise SavedResultError("selection_required")
+        if operation == "history":
+            _history_selection(query.get("phase"), query.get("selection"))
         if source["provider"] == "nfs_registered":
             return perform(self, operation, selection, source, query, cancelled, deadline, check)
         selectors = {k: selection[k] for k in ("attempt", "calcjob_uuid")}
@@ -525,12 +600,17 @@ class SavedResults:
         commit = _json(commit_raw)
         from qcl_negf_contracts.artifacts import validate_commit
 
-        declarations = validate_commit(commit)
-        owners = [d for d in declarations if d.role == "physics.analysis"]
-        if len(owners) != 1:
+        declarations = (
+            _diagnostic_artifacts(commit)
+            if operation in ("diagnostics", "history")
+            else validate_commit(commit)
+        )
+        role = "science.history" if operation in ("diagnostics", "history") else "physics.analysis"
+        owners = [d for d in declarations if d.role == role]
+        if len(owners) != 1 and operation != "diagnostics":
             raise SavedResultError("unsupported_contract")
-        owner = owners[0]
-        if owner.size > OWNER:
+        owner = owners[0] if len(owners) == 1 else None
+        if owner is not None and owner.size > OWNER:
             raise SavedResultError("budget_exceeded")
         source_attempt = data.get("checkpoint_source_attempt", row.get("attempt"))
         if type(source_attempt) is not int or not 1 <= source_attempt <= selection["attempt"]:
@@ -544,6 +624,12 @@ class SavedResults:
             "plan_fingerprint": plan["fingerprint"],
             "source_commit_sha256": commit_sha,
         }
+        if operation in ("diagnostics", "history"):
+            # Native producer identity is distinct from the enclosing provider child.
+            for key in ("run_uuid", "calcjob_uuid"):
+                expected.pop(key, None)
+                if key in commit["identity"] and commit["identity"][key] is not None:
+                    expected[key] = commit["identity"][key]
         for key, wanted in expected.items():
             if key == "source_commit_sha256":
                 continue
@@ -557,8 +643,8 @@ class SavedResults:
                 if type(actual) is not type(wanted) or actual != wanted:
                     raise SavedResultError("identity_mismatch")
         bypath = {d.path: d for d in declarations}
-        closure = {owner.path}
-        pending = list(owner.dependencies)
+        closure = {owner.path} if owner is not None else set()
+        pending = list(owner.dependencies) if owner is not None else []
         while pending:
             path = pending.pop()
             if path in closure:
@@ -591,7 +677,7 @@ class SavedResults:
                 declaration = bypath[path]
                 copy(
                     str(PurePosixPath("result") / parent / path),
-                    OWNER if path == owner.path else METADATA,
+                    OWNER if owner is not None and path == owner.path else METADATA,
                     root / parent / path,
                     declaration.sha256,
                 )
@@ -602,6 +688,8 @@ class SavedResults:
                 ):
                     raise SavedResultError("selection_required")
                 request.update(view_id=query["view_id"], selection=query["selection"])
+            if operation == "history":
+                request.update(phase=query["phase"], selection=query["selection"])
             check()
             result = self.worker(operation, request, root, cancelled, deadline)
             check()
@@ -713,6 +801,20 @@ def _read_request(request, spool):
     else:
         root = spool
     commit = root / _path(request["commit_path"])
+    if request["operation"] in ("diagnostics", "history"):
+        from qcl_negf_results.diagnostic_views import describe_saved_diagnostics, read_saved_history
+
+        if request["operation"] == "diagnostics":
+            return describe_saved_diagnostics(
+                commit, expected_identity=request["expected_identity"]
+            )
+        _history_selection(request.get("phase"), request.get("selection"))
+        return read_saved_history(
+            commit,
+            request["phase"],
+            request["selection"],
+            expected_identity=request["expected_identity"],
+        )
     if request["operation"] == "manifest":
         return describe_saved_views(commit, expected_identity=request["expected_identity"])
     if request["operation"] == "slice":

@@ -542,3 +542,16 @@ footer {
 .structure-table :is(th, td) { border: 1px solid #c3cfdb; padding: .4rem; text-align: left; overflow-wrap: anywhere; }
 .structure-table th { background: #eaf1f8; }
 .structure-table caption { text-align: left; padding-block: .5rem; }
+
+.saved-diagnostics { color-scheme: light; color: #19324b; background: #fff; border: 1px solid #a9bfd1; padding: 1rem; margin-block: 1rem; }
+.saved-diagnostics label { display: grid; gap: .4rem; margin-block: .6rem; }
+.saved-diagnostics :is(input,select) { color: #19324b; background: #fff; border: 1px solid #839aaf; }
+.saved-diagnostics :is(button,input,select,summary):focus-visible { outline: 3px solid #2163c6; outline-offset: 3px; }
+.saved-diagnostics [role="alert"] { color: #8b1d2d; background: #fff1f2; padding: .5rem; }
+.diagnostic-fields { display: flex; flex-wrap: wrap; gap: 1rem; }
+.diagnostic-table { overflow-x: auto; }
+.saved-diagnostics table { border-collapse: collapse; background: #fff; color: #19324b; }
+.saved-diagnostics :is(td,th) { padding: .4rem; border: 1px solid #bdcbd7; text-align: left; }
+.saved-diagnostics th { background: #edf3f9; }
+.diagnostic-plot { width: 100%; max-height: 25rem; background: #fff; }
+.diagnostic-plot text { fill: #19324b; font-size: 12px; }

@@ -228,3 +228,43 @@ I/O128MiB, selected data1MiB/65536 cells, response2MiB and stderr4KiB. Actual na
 mount/ACL/storage witness, no writer/rename/prune and whole closure/borrowed root
 hold require a separate BIND packet. No native NFS, full GUI or science acceptance
 follows from source controls.
+
+## S07: saved diagnostics, not live monitoring
+
+Explicit `GET .../saved-results/diagnostics` and `POST .../saved-results/history`
+share the existing authenticated/no-store exact provider/source/point/commit/
+metadata pins, gate, child, time/capture limits and cleanup fence. History body
+adds only `phase:scba|outer` and exact `{start,stop,step,columns}`: no implicit
+tail/latest/read-all, clipping, export, materialize or solve. At most512 selected
+rows and16 distinct native value columns. Coordinates are always native sequence,
+iteration, SCBA outer_iteration and recorded source attempt, never row-index
+substitutes. Missing units remain unknown. ExactScalar integer tags are kept as
+exact decimal text; plots never coerce large tagged coordinates/values to Number.
+
+The new role is only the selected `science.history`/native-v4 declared closure.
+A failed point without analysis remains a useful diagnostic source. Missing or
+ambiguous history yields an explicit unavailable descriptor while point-commit
+checkpoint metadata can still be displayed. Unsupported/oversized unselected
+analysis is not a prerequisite for this read. NFS `declared_analysis` remains
+its original registration meaning/hash; it is not renamed to history. Retained
+brief preserves this relation without opening analysis; selected operations
+perform their own owner/closure admission. Source native identity, including a
+borrowed/imported attempt and absent UUID, remains distinct from provider child.
+
+Only a descriptor followed by explicit phase/columns/row-range action reads
+values. Manual refresh stays on the same pinned commit; no polling/live claim.
+Tables retain signed values, masks, exact counters, closed-null unknown and raw
+failed/convergence/acceptance statuses. Optional SVG uses owning break_before
+and separates cycles/attempts/gaps/invalid samples; step>1 never joins omitted
+rows. Source/token/point switches fence late success/error and reset views.
+
+Descriptor checks metadata; history read verifies full selected owner SHA plus
+selected native coordinates, not full coordinate inventory/scientific acceptance.
+Limits remain metadata1MiB/owner64MiB/delivered I/O128MiB/selected1MiB/JSON2MiB,
+objects4096/source entries4096 and the existing one-child wall10s/CPU1/AS512MiB
+virtual-address limit (not RSS). Hard I/O/reap uncertainty remains fail-closed.
+Checkpoint payload seconds/bytes and explicit inclusion/JIT flags are shown only
+as recorded; they are not job wall/CPU cost or remaining allocated grant.
+Performance summary remains unavailable/source_binding_missing until an exact
+retained summary binding exists. No newest performance index or unbound session
+is searched. Native BIND, full live/resource accounting and science remain separate.

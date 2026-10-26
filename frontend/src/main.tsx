@@ -34,6 +34,7 @@ import { PublishedReference, RunModelHelp } from "./model-help";
 import { RunStructure } from "./run-structure";
 import { SavedResultsPanel } from "./saved-results";
 import { LivePerformance } from "./live-performance";
+import { RecoveryExecutions } from "./recovery-executions";
 import { ResearchCards } from "./research-cards";
 import { Configurator } from "./configurator";
 import { SubmissionGate, mutationUncertain, verifyPlan } from "./configurator-data.ts";
@@ -628,6 +629,7 @@ function App() {
                 </form>
               </section>
             )}
+            <RecoveryExecutions key={token} token={token} />
             <div className="workspace">
               <section className="panel run-list" aria-label="Workflow list">
                 <div className="list-header">

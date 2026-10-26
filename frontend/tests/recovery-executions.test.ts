@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import ts from 'typescript';
-const uuid='563cc50c-0098-4d67-8f35-ad041b186721';
+const uuid='11111111-1111-4111-8111-111111111111';
 const summary={uuid,pk:132,label:'<recovery>',process_state:'waiting',exit_status:null,is_finished_ok:false,ctime:'2026-01-01',mtime:'2026-01-01',kind:'recovery_execution',caller:null};
 const detail={...summary,plan:{uuid:'plan87',fingerprint:'stored-fingerprint'},execution_id:'point_1',attempt:null,recovery:{input_bundle_uuid:'bundle',input_prior_archive_uuid:null},children:[{uuid:'child134',pk:134,label:'calc',process_state:'waiting',exit_status:null,is_finished_ok:false,ctime:'2026-01-01',mtime:'2026-01-01',attempt:1,job_id:'7',scheduler_state:'RUNNING',retrieved_uuid:null,result_uuid:null,call_label:'iteration_01'}]};
 test('recovery client reads separate authenticated page and detail',async()=>{

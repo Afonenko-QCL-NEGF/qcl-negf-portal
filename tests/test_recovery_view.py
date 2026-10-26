@@ -9,7 +9,7 @@ from qcl_negf_api.service import OPERATIONS, MUTATIONS, ActorDeadline, ActorRece
 from qcl_negf_api.settings import Settings
 
 TOKEN = '0123456789abcdef' * 4
-UUID = '563cc50c-0098-4d67-8f35-ad041b186721'
+UUID = '11111111-1111-4111-8111-111111111111'
 AUTH = {'Authorization': f'Bearer {TOKEN}'}
 
 @pytest.fixture

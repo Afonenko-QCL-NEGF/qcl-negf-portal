@@ -388,3 +388,64 @@ export async function quantumPreviewRaw(token:string,body:string,signal:AbortSig
     return text;
   }finally{clearTimeout(timer);signal.removeEventListener('abort',cancel);}
 }
+
+/** Recovery metadata is separate from Plan workflow/read/export authority. */
+export interface RecoverySummary {
+  uuid: string;
+  pk: number;
+  label: string;
+  process_state: string;
+  exit_status: number | null;
+  is_finished_ok: boolean;
+  ctime: string;
+  mtime: string;
+}
+export interface RecoveryChild extends RecoverySummary {
+  attempt: number | null;
+  job_id: string | null;
+  scheduler_state: string | null;
+  retrieved_uuid: string | null;
+  result_uuid: string | null;
+  call_label: string;
+}
+export interface RecoveryExecution extends RecoverySummary {
+  kind: 'recovery_execution';
+  caller: {uuid: string; process_type: string} | null;
+}
+export interface RecoveryExecutionDetail extends RecoveryExecution {
+  plan: {uuid: string; fingerprint: string};
+  execution_id: string | null;
+  attempt: number | null;
+  recovery: {input_bundle_uuid: string | null; input_prior_archive_uuid: string | null};
+  children: RecoveryChild[];
+}
+export async function listRecoveryExecutions(token: string, offset = 0): Promise<RecoveryExecution[]> {
+  const value = await api<{recovery_executions: RecoveryExecution[]}>(
+    token, `/recovery-executions?limit=25&offset=${offset}`);
+  return value.recovery_executions;
+}
+export function getRecoveryExecution(token: string, uuid: string): Promise<RecoveryExecutionDetail> {
+  return api<RecoveryExecutionDetail>(token, `/recovery-executions/${encodeURIComponent(uuid)}`);
+}
+/** Each panel owns its guard. Invalidated promises can finish but never publish. */
+export class RecoveryRequests {
+  private listGeneration = 0;
+  private detailGeneration = 0;
+  invalidate() { this.listGeneration++; this.detailGeneration++; }
+  async list(token: string, offset: number, accept: (value: RecoveryExecution[]) => void,
+      reject: (error: unknown) => void) {
+    const generation = ++this.listGeneration;
+    try {
+      const value = await listRecoveryExecutions(token, offset);
+      if (generation === this.listGeneration) accept(value);
+    } catch (error) { if (generation === this.listGeneration) reject(error); }
+  }
+  async detail(token: string, uuid: string, accept: (value: RecoveryExecutionDetail) => void,
+      reject: (error: unknown) => void) {
+    const generation = ++this.detailGeneration;
+    try {
+      const value = await getRecoveryExecution(token, uuid);
+      if (generation === this.detailGeneration) accept(value);
+    } catch (error) { if (generation === this.detailGeneration) reject(error); }
+  }
+}

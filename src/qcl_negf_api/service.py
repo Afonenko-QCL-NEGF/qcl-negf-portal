@@ -30,6 +30,8 @@ MUTATIONS = frozenset({"submit_plan", "kill_run", "save_agent_report",
     "attach_research_card_report"})
 OPERATIONS = CARD_OPERATIONS | frozenset(
     {
+        "list_recovery_executions",
+        "get_recovery_execution",
         "list_runs",
         "get_run",
         "get_model_help_input",

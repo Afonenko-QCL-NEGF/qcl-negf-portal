@@ -15,7 +15,7 @@ from uuid import UUID
 
 import anyio
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from jsonschema.exceptions import ValidationError as SchemaValidationError
@@ -688,6 +688,20 @@ def create_app(settings: Settings | None = None, service: Any = None,
             return JSONResponse(payload,
                                 status_code=status,headers={'Cache-Control':'no-store'})
 
+    @app.get("/api/v1/recovery-executions", dependencies=protected)
+    def recovery_executions(
+        request: Request,
+        limit: int = Query(25, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+    ) -> dict:
+        return {"recovery_executions": invoke(
+            request, "list_recovery_executions", limit=limit, offset=offset,
+        )}
+
+    @app.get("/api/v1/recovery-executions/{recovery_uuid}", dependencies=protected)
+    def recovery_execution(request: Request, recovery_uuid: UUID) -> dict:
+        return invoke(request, "get_recovery_execution", str(recovery_uuid))
+
     @app.get("/api/v1/runs", dependencies=protected)
     def runs(
         request: Request,
@@ -1065,5 +1079,15 @@ def create_app(settings: Settings | None = None, service: Any = None,
 
     static = Path(__file__).parent / "static"
     if static.is_dir():
+        if (static / "index.html").is_file():
+            @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+            @app.api_route("/index.html", methods=["GET", "HEAD"], include_in_schema=False)
+            def browser_entry() -> FileResponse:
+                # StaticFiles stat validators may collide across packaged releases.
+                return FileResponse(
+                    static / "index.html", media_type="text/html",
+                    headers={"Cache-Control": "no-cache, must-revalidate"},
+                )
+
         app.mount("/", StaticFiles(directory=static, html=True), name="web")
     return app

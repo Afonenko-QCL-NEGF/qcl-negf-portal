@@ -25,6 +25,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
+from .cluster_status import ClusterStatus, ClusterStatusError, query_token
 from .configurator import Configurator, ConfiguratorError
 from .documentation import Documentation
 from .exports import ExportBusy, ExportStorage, ExportStore
@@ -186,11 +187,13 @@ def byte_range(request: Request, size: int, etag: str | None = None) -> tuple[in
 
 
 def create_app(settings: Settings | None = None, service: Any = None,
-               *, configurator: Any = None, saved_results: Any = None) -> FastAPI:
+               *, configurator: Any = None, saved_results: Any = None,
+               cluster_status: Any = None) -> FastAPI:
     """Create the server; inject a service only in tests or an embedding application."""
     settings = settings or Settings.from_environment()
     documentation = Documentation.load(settings)
     configurator = configurator if configurator is not None else Configurator(settings)
+    cluster_status = cluster_status if cluster_status is not None else ClusterStatus(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -200,6 +203,7 @@ def create_app(settings: Settings | None = None, service: Any = None,
             app.state.service = service
         app.state.exports = ExportStore(app.state.service, settings)
         app.state.configurator = configurator
+        app.state.cluster_status = cluster_status
         app.state.saved_results = (saved_results if saved_results is not None else
                                    SavedResults(app.state.service, settings))
         try:
@@ -209,7 +213,10 @@ def create_app(settings: Settings | None = None, service: Any = None,
                 try:
                     await app.state.saved_results.close()
                 finally:
-                    await configurator.close()
+                    try:
+                        await cluster_status.close()
+                    finally:
+                        await configurator.close()
             finally:
                 deadline = time.monotonic() + settings.actor_close_timeout_seconds
                 try:
@@ -258,6 +265,34 @@ def create_app(settings: Settings | None = None, service: Any = None,
             )
 
     protected = [Depends(authenticate)]
+
+    @app.get("/api/v1/cluster/status", dependencies=protected)
+    async def cluster_view(request: Request):
+        pairs = list(request.query_params.multi_items())
+        if (
+            any(key not in {"cursor", "limit"} for key, _ in pairs)
+            or len({key for key, _ in pairs}) != len(pairs)
+            or await request.body()
+        ):
+            return JSONResponse({"detail": {"code": "cluster_cache_query_invalid"}}, 422)
+        cursor = request.query_params.get("cursor")
+        raw_limit = request.query_params.get("limit", "64")
+        if not raw_limit.isascii() or not raw_limit.isdecimal() or len(raw_limit) > 3:
+            return JSONResponse({"detail": {"code": "cluster_cache_query_invalid"}}, 422)
+        limit = int(raw_limit)
+        try:
+            query_token(cursor=cursor, limit=limit)
+            result = await request.app.state.cluster_status.read(cursor=cursor, limit=limit)
+        except ClusterStatusError as error:
+            status = (
+                422
+                if error.code == "cluster_cache_query_invalid"
+                else 409
+                if error.code == "stale_cursor"
+                else 503
+            )
+            return JSONResponse({"detail": {"code": error.code}}, status)
+        return JSONResponse(result)
 
     def grant_download(request: Request, target: str) -> JSONResponse:
         expires = str(int(time.time()) + 3600)

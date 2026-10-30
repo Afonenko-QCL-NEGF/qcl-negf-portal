@@ -104,6 +104,9 @@ The output directory for `verdi node repo dump` must not exist. Choose a differe
 
 ## HTTP API
 
+The cluster panel has a [Russian user guide](docs/cluster-status.md) covering freshness,
+unknown values, paging, unavailable snapshots and disconnect behavior.
+
 Active closed-prefix history and exact retained execution performance are
 documented in [live-performance.md](docs/live-performance.md). These optional
 read-only views preserve coverage gaps and unknown measurements independently

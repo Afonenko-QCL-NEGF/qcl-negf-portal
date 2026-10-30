@@ -169,9 +169,11 @@ export class ApiError extends Error {
   outcome: string | null;
   unresolvedOperationId: string | null;
   status: number;
-  constructor(message: string, headers: Headers, status = 0) {
+  code: string | null;
+  constructor(message: string, headers: Headers, status = 0, code: string | null = null) {
     super(message);
     this.status = status;
+    this.code = code;
     this.operationId = headers.get("X-QCL-Operation-ID");
     this.outcome = headers.get("X-QCL-Operation-Outcome");
     this.unresolvedOperationId = headers.get("X-QCL-Unresolved-Operation-ID");
@@ -182,6 +184,7 @@ export async function api<T>(
   token: string,
   path: string,
   data?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(`/api/v1${path}`, {
     method: data === undefined ? "GET" : "POST",
@@ -191,12 +194,14 @@ export async function api<T>(
     },
     body: data === undefined ? undefined : JSON.stringify(data),
     cache: "no-store",
+    ...(signal ? { signal } : {}),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new ApiError(
       payload ? describeDetail(payload.detail ?? payload.reason) : `HTTP ${response.status}`,
       response.headers, response.status,
+      typeof payload?.detail?.code === "string" ? payload.detail.code : null,
     );
   }
   return response.json() as Promise<T>;

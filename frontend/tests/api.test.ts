@@ -218,3 +218,13 @@ test('same-run navigation preserves current controls and refresh generation', ()
   selectWorkflowRun('run-A',current,sequence,() => trace.push('clear'),uuid => trace.push(uuid));
   assert.deepEqual([current.current,sequence.current,trace],['run-A',7,[]]);
 });
+
+test('cluster error preserves optional structured code and status, credentials stay header-only', async () => {
+ const original=globalThis.fetch;
+ try {
+  for(const [status,detail,code] of [[409,{code:'stale_cursor'},'stale_cursor'],[409,'stale_cursor',null],[401,{code:1},null],[422,'invalid',null],[503,'unavailable',null]] as const) {
+   globalThis.fetch=async(url,init)=>{assert.equal(String(url),'/api/v1/cluster/status?limit=64');assert.equal(init?.cache,'no-store');assert.equal((init?.headers as Record<string,string>).Authorization,'Bearer secret');return new Response(JSON.stringify({detail}),{status});};
+   await assert.rejects(api('secret','/cluster/status?limit=64'),(error:unknown)=>{assert.equal((error as any).status,status);assert.equal((error as any).code,code);return true;});
+  }
+ } finally {globalThis.fetch=original;}
+});

@@ -42,7 +42,7 @@ test('loading/errors/drift/local truncation remain semantic, with old success cl
 });
 test('fixed light theme, focus outline, and escaped text remain explicit in source',async()=>{
  const css=await readFile(new URL('../src/style.css',import.meta.url),'utf8');assert.match(css,/color-scheme:\s*light/);assert.doesNotMatch(css,/prefers-color-scheme:\s*dark/);assert.match(css,/\.cluster-panel[\s\S]*background:\s*#fff/);assert.match(css,/\.cluster-panel[\s\S]*focus-visible[\s\S]*outline/);assert.doesNotMatch(source,/dangerouslySetInnerHTML/);
- const main=await readFile(new URL('../src/main.tsx',import.meta.url),'utf8');assert.match(main,/token && <ClusterStatus key=\{token\} token=\{token\}/);
+ const main=await readFile(new URL('../src/main.tsx',import.meta.url),'utf8');assert.match(main,/token && <ClusterStatus key=\{`cluster:\$\{token\}`\} token=\{token\}/);
 });
 
 test('actual label requires all displayed resource freshness and sources; stale operation cannot become actual',()=>{

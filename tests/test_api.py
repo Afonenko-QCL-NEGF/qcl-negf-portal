@@ -1073,3 +1073,176 @@ def test_resource_mode_schema_and_manual_caps_still_refuse(service, change):
             "plan": "{}", "code_uuid": CODE, **change,
         })
     assert response.status_code == 422 and not service.calls
+
+
+def test_cluster_status_uses_existing_auth_and_preserves_unknown_without_actor_calls(service):
+    from test_cluster_status import UNKNOWN
+
+    calls = []
+
+    class Cache:
+        async def read(self, *, cursor=None, limit=64):
+            calls.append((cursor, limit))
+            return UNKNOWN
+
+        async def close(self):
+            calls.append("closed")
+
+    with TestClient(
+        create_app(Settings(TOKEN, (CODE,)), service, cluster_status=Cache())
+    ) as client:
+        for headers in [{}, {"Authorization": "Bearer wrong"}]:
+            assert client.get("/api/v1/cluster/status", headers=headers).status_code == 401
+        assert calls == []
+        result = client.get("/api/v1/cluster/status", headers=AUTH)
+        assert result.status_code == 200 and result.json() == UNKNOWN
+        assert result.headers["cache-control"] == "no-store"
+        assert calls == [(None, 64)] and service.calls == []
+    assert calls[-1] == "closed"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "?limit=0",
+        "?limit=129",
+        "?limit=1&limit=2",
+        "?cursor=a&cursor=b",
+        "?request_id=lookup",
+        "?path=/private",
+        "?cursor=",
+        "?limit=true",
+        "?limit=-1",
+    ],
+)
+def test_cluster_status_closed_query_rejected_before_adapter(service, query):
+    class Cache:
+        async def read(self, **kwargs):
+            pytest.fail("invalid query reached child")
+
+        async def close(self):
+            pass
+
+    with TestClient(
+        create_app(Settings(TOKEN, (CODE,)), service, cluster_status=Cache())
+    ) as client:
+        assert client.get("/api/v1/cluster/status" + query, headers=AUTH).status_code == 422
+        assert (
+            client.request(
+                "GET", "/api/v1/cluster/status", headers=AUTH, content=b"body"
+            ).status_code
+            == 422
+        )
+
+
+@pytest.mark.parametrize(
+    "code,status",
+    [
+        ("stale_cursor", 409),
+        ("cluster_cache_unavailable", 503),
+        ("cluster_cache_timeout", 503),
+        ("cluster_cache_busy", 503),
+        ("cluster_cache_invalid", 503),
+        ("cluster_value_out_of_browser_range", 503),
+    ],
+)
+def test_cluster_status_errors_have_closed_codes_and_no_fabricated_dto(service, code, status):
+    from qcl_negf_api.cluster_status import ClusterStatusError
+
+    class Cache:
+        async def read(self, **kwargs):
+            raise ClusterStatusError(code)
+
+        async def close(self):
+            pass
+
+    with TestClient(
+        create_app(Settings(TOKEN, (CODE,)), service, cluster_status=Cache())
+    ) as client:
+        result = client.get("/api/v1/cluster/status", headers=AUTH)
+        assert result.status_code == status
+        assert result.json() == {"detail": {"code": code}}
+        assert result.headers["cache-control"] == "no-store"
+
+
+def test_cluster_status_missing_binding_is_honest_unavailable_and_other_routes_work(service):
+    with TestClient(create_app(Settings(TOKEN, (CODE,)), service)) as client:
+        result = client.get("/api/v1/cluster/status", headers=AUTH)
+        assert result.status_code == 503 and result.json() == {
+            "detail": {"code": "cluster_cache_unavailable"}
+        }
+        assert client.get("/api/v1/runs", headers=AUTH).status_code == 200
+
+
+def test_cluster_status_passes_only_opaque_cursor_and_bounded_limit(service):
+    from test_cluster_status import UNKNOWN
+
+    calls = []
+
+    class Cache:
+        async def read(self, *, cursor=None, limit=64):
+            calls.append((cursor, limit))
+            return UNKNOWN
+
+        async def close(self):
+            pass
+
+    with TestClient(
+        create_app(Settings(TOKEN, (CODE,)), service, cluster_status=Cache())
+    ) as client:
+        assert (
+            client.get(
+                "/api/v1/cluster/status?cursor=opaque_B-cursor&limit=128", headers=AUTH
+            ).status_code
+            == 200
+        )
+        assert calls == [("opaque_B-cursor", 128)]
+        assert (
+            client.get("/api/v1/cluster/status?cursor=" + ("a" * 8192), headers=AUTH).status_code
+            == 422
+        )
+        assert calls == [("opaque_B-cursor", 128)]
+
+
+def test_cluster_status_setting_is_optional_and_reads_only_explicit_launch_env(
+    tmp_path, monkeypatch
+):
+    token = tmp_path / "token"
+    token.write_text(TOKEN)
+    monkeypatch.setenv("QCL_NEGF_API_TOKEN_FILE", str(token))
+    monkeypatch.setenv("QCL_NEGF_ALLOWED_CODES", CODE)
+    monkeypatch.delenv("QCL_NEGF_CLUSTER_CACHE_EXECUTABLE", raising=False)
+    assert Settings.from_environment().cluster_cache_executable is None
+    value = "/nix/store/monitor/bin/qcl-negf-cluster-cache-status"
+    monkeypatch.setenv("QCL_NEGF_CLUSTER_CACHE_EXECUTABLE", value)
+    assert Settings.from_environment().cluster_cache_executable == value
+
+
+def test_cluster_lifecycle_cleanup_does_not_skip_existing_finalizers_on_saved_failure(service):
+    events = []
+
+    class Saved:
+        async def close(self):
+            events.append("saved")
+            raise RuntimeError("saved close fixture")
+
+    class Cache:
+        async def close(self):
+            events.append("cluster")
+
+    class Configurator:
+        async def close(self):
+            events.append("configurator")
+
+    with pytest.raises(RuntimeError, match="saved close fixture"):
+        with TestClient(
+            create_app(
+                Settings(TOKEN, (CODE,)),
+                service,
+                saved_results=Saved(),
+                cluster_status=Cache(),
+                configurator=Configurator(),
+            )
+        ):
+            pass
+    assert events == ["saved", "cluster", "configurator"]

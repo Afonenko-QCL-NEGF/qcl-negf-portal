@@ -49,6 +49,7 @@ class Settings:
     actor_close_timeout_seconds: float = ACTOR_DEFAULTS["actor_close_timeout_seconds"]
     actor_max_pending_calls: int = ACTOR_DEFAULTS["actor_max_pending_calls"]
     actor_max_open_artifacts: int = ACTOR_DEFAULTS["actor_max_open_artifacts"]
+    cluster_cache_executable: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.saved_results_enabled) is not bool:
@@ -148,6 +149,7 @@ class Settings:
             configurator_catalog_root=os.environ.get("QCL_NEGF_CONFIGURATOR_CATALOG_ROOT"),
             configurator_catalog_source_id=os.environ.get("QCL_NEGF_CONFIGURATOR_CATALOG_SOURCE_ID"),
             configurator_cgroup_root=os.environ.get("QCL_NEGF_CONFIGURATOR_CGROUP_ROOT"),
+            cluster_cache_executable=os.environ.get("QCL_NEGF_CLUSTER_CACHE_EXECUTABLE"),
             saved_results_binding_file=os.environ.get("QCL_NEGF_SAVED_RESULTS_BINDING_FILE"),
             saved_results_enabled=(
                 os.environ.get("QCL_NEGF_SAVED_RESULTS_ENABLED", "true") == "true"

@@ -312,3 +312,35 @@ Unavailable planner/catalog configuration leaves raw plan upload and historical
 run reads available. Runtime availability comes from `/api/v1/config`; an absent
 planner version is shown as unknown. This interface does not alter the active
 SCI4 run, install a planner, grant resources, or establish scientific acceptance.
+
+## Cached cluster status
+
+`GET /api/v1/cluster/status?cursor=<opaque>&limit=64` uses the existing bearer token and
+`Cache-Control: no-store`. Only `cursor` and `limit` are accepted, once each; GET bodies, unknown
+selectors, invalid cursors and limits outside 1–128 return 422. The complete encoded query must fit
+8192 bytes. The endpoint does not call the AiiDA actor or ORM.
+
+The optional launch setting `QCL_NEGF_CLUSTER_CACHE_EXECUTABLE` selects Platform's **direct regular
+immutable store client** `qcl-negf-cluster-cache-status`. Platform's default-off
+`qclNegf.monitoring.observation.portalCache.enable` owns its binding, fixed local socket and exact
+service UID authorization. Portal checks the normalized root-owned immutable namespace at startup
+without executing it; missing or unreadable capability leaves this route unavailable. It does not
+read protected monitoring files, discover paths from requests, import sibling Platform modules or
+invoke sudo/SSH. Installing the package alone does not establish socket or service readiness.
+
+The fixed subprocess receives `--query-base64 TOKEN`: public `qcl.cluster-query.v1`, with
+`request_id=null`, caller cursor and bounded limit. Platform validates the full owning
+`qcl.cluster-projection.v2` before stdout. Portal preserves that DTO, rejects duplicate/nonfinite or
+extra JSON and integers outside the browser's exact range, and caps stdout at 1048577 bytes
+(including LF), stderr at 4096 bytes. Four requests may run concurrently; additional requests fail
+fast. The request deadline is six seconds, cleanup at most one further second. Cancellation and
+shutdown stop/reap the owned child group; uncertain cleanup closes further admission. There is no
+retry, refresh/probe, qualification, P20 lookup, scientific scan or fallback on a poll.
+
+A valid unknown/partial view returns 200, preserving native observation timestamps, coverage,
+nullable measurements and opaque pagination. Fresh empty data and missing data remain different.
+A clean owner `stale_cursor` returns 409; restart pagination from the first page on the next ordinary
+poll. Missing client/socket, timeout, overload, invalid reply or unsafe browser integer returns 503
+with a closed `detail.code`, without private diagnostics or manufactured empty/zero measurements.
+Existing per-execution performance routes and their exact selectors remain separate. This change
+does not provide a new performance producer, scientific acceptance or a frontend view.

@@ -454,7 +454,7 @@ function App() {
         </div>
       </header>
       <main>
-        {token && <ClusterStatus key={token} token={token} />}
+        {token && <ClusterStatus key={`cluster:${token}`} token={token} />}
         {token && <ResearchCards key={token} token={token} onSelectRun={selectRun} />}
         {token && config && (
           <PublishedReference documentation={config.documentation} />

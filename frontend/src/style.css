@@ -562,3 +562,23 @@ footer {
 .quantum-chart { margin: 1rem 0; background: #fff; border: 1px solid #c6d2df; padding: .5rem; }
 .quantum-chart svg { display: block; width: 100%; height: auto; background: #fff; }
 .quantum-result table { background: #fff; color: #18344f; }
+
+/* Operational cache projection stays light in every state. */
+.cluster-panel { background: #fff; color: #172b3a; border: 1px solid #8295a3; }
+.cluster-panel summary { cursor: pointer; font-size: 1.15rem; font-weight: 650; padding: .5rem; }
+.cluster-panel :is(button, a, summary):focus-visible { outline: 3px solid #145c96; outline-offset: 3px; }
+.cluster-panel a { color: #125385; text-decoration: underline; }
+.cluster-content { padding-top: .75rem; overflow-wrap: anywhere; }
+.cluster-host { margin: 1rem 0; padding: 1rem; border: 1px solid #8295a3; border-radius: .5rem; background: #f7fafc; }
+.cluster-panel h4 { margin: 1rem 0 .4rem; }
+.cluster-coverage { font-size: .9rem; margin: .35rem 0; color: #2e4659; }
+.cluster-items { padding-left: 1.3rem; }
+.cluster-items > li { margin: .7rem 0; }
+.cluster-reasons { color: #563a11; }
+.cluster-table-scroll { overflow-x: auto; max-width: 100%; }
+.cluster-panel table { width: 100%; border-collapse: collapse; background: #fff; }
+.cluster-panel :is(td, th) { padding: .6rem; text-align: left; vertical-align: top; border: 1px solid #9aaab7; }
+.cluster-panel thead { background: #eaf2f8; color: #172b3a; }
+.cluster-status-label { padding: .65rem; background: #edf4fa; border: 1px solid #8295a3; }
+.cluster-error { background: #fff3f2; color: #78251f; border: 1px solid #ae4b42; padding: .7rem; margin: .7rem 0; }
+.cluster-warning { background: #fff8e8; color: #60420d; border: 1px solid #a67c32; padding: .7rem; }

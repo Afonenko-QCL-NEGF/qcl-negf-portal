@@ -36,6 +36,7 @@ import { SavedResultsPanel } from "./saved-results";
 import { LivePerformance } from "./live-performance";
 import { RecoveryExecutions } from "./recovery-executions";
 import { ResearchCards } from "./research-cards";
+import { ClusterStatus } from "./cluster-status";
 import { Configurator } from "./configurator";
 import { SubmissionGate, mutationUncertain, verifyPlan } from "./configurator-data.ts";
 import type { PlanSelection } from "./configurator-data.ts";
@@ -453,6 +454,7 @@ function App() {
         </div>
       </header>
       <main>
+        {token && <ClusterStatus key={token} token={token} />}
         {token && <ResearchCards key={token} token={token} onSelectRun={selectRun} />}
         {token && config && (
           <PublishedReference documentation={config.documentation} />

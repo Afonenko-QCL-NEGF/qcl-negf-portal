@@ -2,9 +2,8 @@
 import re
 from uuid import UUID
 
-from qcl_negf_contracts import schema_validator
-from qcl_negf_contracts.messages import MAX_PLAN_BYTES, encode
-from qcl_negf_contracts.model_help import _validate_model_help_bindings
+from qcl_negf_contracts.messages import MAX_PLAN_BYTES
+from qcl_negf_contracts.model_help import validate_model_help_view
 
 
 class MalformedModelHelp(RuntimeError):
@@ -53,11 +52,7 @@ def model_help_view(dto):
         'fragment': None, 'inputs': [],
         'input_status': {'status': 'unavailable', 'reason': 'inventory_unavailable'},
     }
-    # C1 precedes C2. Never fabricate a point passport for the ordinary nested plan.
-    if len(encode(view)) > 65536:
-        raise ValueError('Model help exceeds byte budget')
-    schema_validator('model-help.schema.json').validate(view)
-    _validate_model_help_bindings(view, retained={
+    validate_model_help_view(view, retained={
         'selection': {'context': view['context'], 'release_id': dto['release_id']},
         'metadata': {'frozen_plan': dict(dto['frozen_plan'])},
     })

@@ -303,7 +303,7 @@ def test_native_export_capability_is_scoped_and_download_resumes(service, monkey
         kwargs["progress"]({"phase": "compressing", "completed_bytes": 4, "total_bytes": 4})
         (destination / f"{digest}.tar.xz").write_bytes(payload)
         return {
-            "schema": "qcl-negf.science-export.v3", "contract_set": "qcl-negf.results.v1",
+            "schema": "qcl-negf.science-export.v3", "contract_set": "qcl-negf.results.v2",
             "id": "point_1", "profile": "science", "snapshot_identity": "b" * 64,
             "sha256": digest, "bytes": len(payload), "archive": f"{digest}.tar.xz",
             "filename": "point_1-science-bbbbbbbbbbbb.tar.xz", "complete": False,

@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from uuid import UUID
 
-from .saved_results import METADATA, OWNER, SavedResultError, _bytes, _json, _path
+from .saved_results import METADATA, SavedResultError, _bytes, _json, _path
 
 REFS = (
     "namespace_id",
@@ -152,520 +152,6 @@ def load_binding(filename):
         return None
 
 
-def _selection_matches(actual, selection):
-    if not same(actual, selection):
-        fail("identity_mismatch")
-
-
-def _dto_guard(function):
-    def guarded(*args, **kwargs):
-        try:
-            return function(*args, **kwargs)
-        except KeyError, IndexError, TypeError, AttributeError, UnicodeError, RecursionError:
-            fail()
-
-    return guarded
-
-
-@_dto_guard
-def catalogue(adapter, selection):
-    result = adapter.service.get_saved_sources(
-        selection["run_uuid"],
-        selection["execution_id"],
-        attempt=selection["attempt"],
-        calcjob_uuid=selection["calcjob_uuid"],
-    )
-    result = _json(_bytes(result))
-    _selection_matches(result.get("selection"), selection)
-    rows = result.get("sources")
-    if result.get("complete") is not True or not isinstance(rows, list):
-        fail()
-    if len(rows) > 256:
-        fail("budget_exceeded")
-    sources = []
-    seen = set()
-    for row in rows:
-        _selection_matches(row.get("selection"), selection)
-        source = stored_uuid(row.get("source_uuid"))
-        digest(row.get("source_sha256"))
-        if (
-            source in seen
-            or row.get("status") != "available"
-            or row.get("metadata_status") != "verified"
-            or "copy_status" not in row
-        ):
-            fail()
-        seen.add(source)
-        sources.append(
-            {
-                k: row[k]
-                for k in (
-                    "status",
-                    "source_uuid",
-                    "source_sha256",
-                    "selection",
-                    "metadata_status",
-                    "copy_status",
-                )
-            }
-            | {"access_status": "not_checked"}
-        )
-    return dict(
-        selection=selection,
-        provider_selection=selection,
-        provider="nfs_registered",
-        sources=sources,
-        complete=True,
-        storage_binding_status="configured" if adapter.binding else "unavailable",
-    )
-
-
-@_dto_guard
-def retained(dto, selection, source):
-    dto = _json(_bytes(dto))
-    if not isinstance(dto, dict):
-        fail()
-    _selection_matches(dto.get("selection"), selection)
-    if (
-        dto.get("source_uuid") != source["source_uuid"]
-        or dto.get("source_sha256") != source["source_sha256"]
-    ):
-        fail("identity_mismatch")
-    if (
-        dto.get("status") != "available"
-        or dto.get("metadata_status") != "verified"
-        or dto.get("access_status") != "not_checked"
-    ):
-        fail()
-    record = dto.get("record")
-    metadata = dto.get("metadata")
-    plan = dto.get("plan")
-    if (
-        not isinstance(record, dict)
-        or record.get("schema") != "qcl-negf.aiida-saved-source.v1"
-        or sha(canonical(record)) != source["source_sha256"]
-    ):
-        fail("identity_mismatch")
-    required_record = {
-        "schema",
-        "selection",
-        "plan",
-        "storage",
-        "snapshot",
-        "points",
-        "metadata",
-        "integrity",
-        "copy_status",
-        "request_uuid",
-        "request_sha256",
-        "registration_source_id",
-    }
-    if set(record) != required_record:
-        fail()
-    storage = record.get("storage")
-    if not isinstance(storage, dict) or set(storage) != {
-        *REFS,
-        "computer_uuid",
-        "remote_folder_uuid",
-        "relative_result_root",
-    }:
-        fail()
-    stored_uuid(storage["computer_uuid"])
-    stored_uuid(storage["remote_folder_uuid"])
-    path(storage["relative_result_root"])
-    _selection_matches(record.get("selection"), selection)
-    if not same(dto.get("copy_status"), record.get("copy_status")):
-        fail()
-    if not isinstance(plan, str) or not isinstance(metadata, dict):
-        fail()
-    plan_raw = plan.encode("utf-8")
-    if len(plan_raw) > METADATA:
-        fail("budget_exceeded")
-    if sha(plan_raw) != record["plan"]["sha256"]:
-        fail("identity_mismatch")
-    plan_obj = _json(plan_raw)
-    if plan_obj.get("fingerprint") != record["plan"]["plan_fingerprint"]:
-        fail("identity_mismatch")
-    descriptors = record.get("metadata")
-    points = record.get("points")
-    if not isinstance(descriptors, list) or not isinstance(points, list):
-        fail()
-    if len(points) > 256 or len(descriptors) > 1024:
-        fail("budget_exceeded")
-    names = set()
-    total = 0
-    raws = {}
-    for item in descriptors:
-        name = path(item["path"], reserved=True)
-        if name in names or not isinstance(metadata.get(name), str):
-            fail()
-        names.add(name)
-        raw = metadata[name].encode("utf-8")
-        total += len(raw)
-        if total > METADATA:
-            fail("budget_exceeded")
-        if (
-            type(item.get("bytes")) is not int
-            or item["bytes"] != len(raw)
-            or sha(raw) != item.get("sha256")
-        ):
-            fail()
-        _json(raw)
-        raws[name] = raw
-    if set(metadata) != names:
-        fail()
-    snapshot = record["snapshot"]
-    if snapshot.get("metadata_set_sha256") != sha(canonical(descriptors)):
-        fail()
-    series = raws.get("series_result.json")
-    if (
-        series is None
-        or type(snapshot.get("result_bytes")) is not int
-        or not 0 < snapshot["result_bytes"] <= METADATA
-        or len(series) != snapshot["result_bytes"]
-        or sha(series) != snapshot.get("result_sha256")
-    ):
-        fail()
-    if (
-        type(snapshot.get("complete")) is not bool
-        or snapshot.get("publication_state") != "closed_registered"
-    ):
-        fail()
-    if record.get("integrity") != {
-        "metadata": "verified",
-        "payload": "not_measured",
-        "payload_receipt_ref": None,
-    }:
-        fail("unsupported_contract")
-    series_obj = _json(series)
-    rows = {}
-    for row in series_obj.get("points", []):
-        if row["id"] in rows:
-            fail()
-        rows[row["id"]] = row
-    frozen = {
-        point["id"]
-        for point in plan_obj["points"]
-        if point["execution_id"] == selection["execution_id"]
-    }
-    captured = {}
-    for point in points:
-        name = point.get("point_id")
-        if not isinstance(name, str) or name in captured:
-            fail()
-        if name not in frozen:
-            fail("identity_mismatch")
-        relative = path(point["commit_path"])
-        raw = raws.get(relative)
-        if raw is None or sha(raw) != point.get("commit_sha256"):
-            fail("identity_mismatch")
-        commit = _json(raw)
-        identity = point["native_identity"]
-        if not isinstance(identity, dict) or not same(identity, commit.get("identity")):
-            fail("identity_mismatch")
-        for key, wanted in {
-            "point_id": name,
-            "execution_id": selection["execution_id"],
-            "attempt": point["source_attempt"],
-            "plan_fingerprint": plan_obj["fingerprint"],
-        }.items():
-            if not same(identity.get(key), wanted):
-                fail("identity_mismatch")
-        if (
-            type(point["source_attempt"]) is not int
-            or type(point["row_attempt"]) is not int
-            or not 1 <= point["source_attempt"] <= point["row_attempt"] <= selection["attempt"]
-        ):
-            fail("identity_mismatch")
-        if point.get("source_calcjob_uuid") is not None:
-            stored_uuid(point["source_calcjob_uuid"])
-        row = rows.get(name, {})
-        if row.get("data", {}).get("result_commit") != relative or not same(
-            row.get("attempt"), point["row_attempt"]
-        ):
-            fail("identity_mismatch")
-        if (
-            row.get("data", {}).get("source_commit_sha256", point["commit_sha256"])
-            != point["commit_sha256"]
-        ):
-            fail("identity_mismatch")
-        source_attempt = row.get("data", {}).get("checkpoint_source_attempt", row.get("attempt"))
-        if not same(source_attempt, point["source_attempt"]):
-            fail("identity_mismatch")
-        # Validate declared closure without opening any NFS path.
-        # Retained registration pins analysis metadata, independent of the selected read role.
-        from qcl_negf_contracts.artifacts import validate_commit
-
-        validate_commit({**commit, "artifacts": []})
-        artifact_rows = commit.get("artifacts")
-        if (
-            not isinstance(artifact_rows, list)
-            or len(artifact_rows) > 4096
-            or any(not isinstance(d, dict) for d in artifact_rows)
-        ):
-            fail("corrupt_result")
-        registered = [d for d in artifact_rows if d.get("role") == "physics.analysis"]
-        if len(registered) > 1:
-            fail("corrupt_result")
-        owner = registered[0] if registered else None
-        actual = (
-            None
-            if owner is None
-            else dict(
-                path=str(Path(relative).parent / path(owner["path"])),
-                bytes=owner["bytes"],
-                sha256=owner["sha256"],
-                schema=owner["schema"],
-            )
-        )
-        if actual is not None and (
-            actual["schema"] != "qcl-negf-physics-analysis-v4"
-            or type(actual["bytes"]) is not int
-            or actual["bytes"] < 0
-        ):
-            fail("corrupt_result")
-        if not same(actual, point.get("declared_analysis")):
-            fail("identity_mismatch")
-        captured[name] = point
-    if snapshot["complete"] and set(captured) != frozen:
-        fail("identity_mismatch")
-    return record, raws, plan_raw, series, plan_obj, series_obj, captured
-
-
-def declarations(commit, relative, *, operation="manifest"):
-    from qcl_negf_contracts.artifacts import validate_commit
-
-    if operation in ("diagnostics", "history"):
-        from .saved_results import _diagnostic_artifacts
-
-        declared = _diagnostic_artifacts(commit)
-    else:
-        declared = validate_commit(commit)
-    bypath = {d.path: d for d in declared}
-    role = "science.history" if operation in ("diagnostics", "history") else "physics.analysis"
-    owners = [d for d in declared if d.role == role]
-    if len(owners) != 1 and operation == "diagnostics":
-        return [], None
-    if len(owners) > 1:
-        fail("unsupported_contract")
-    if not owners:
-        return [], None
-    owner = owners[0]
-    path(owner.path)
-    schema = (
-        "qcl-negf-scientific-history-v4"
-        if role == "science.history"
-        else "qcl-negf-physics-analysis-v4"
-    )
-    if owner.schema != schema:
-        fail("unsupported_contract")
-    if owner.size > OWNER:
-        fail("budget_exceeded")
-    closure = {owner.path}
-    pending = list(owner.dependencies)
-    total = 0
-    while pending:
-        name = path(pending.pop())
-        if name in closure:
-            continue
-        dep = bypath[name]
-        if dep.media_type != "application/json":
-            fail("unsupported_contract")
-        total += dep.size
-        if total > METADATA:
-            fail("budget_exceeded")
-        closure.add(name)
-        pending.extend(dep.dependencies)
-    parent = Path(relative).parent
-    return [path(str(parent / name)) for name in closure], owner
-
-
-def _cursor(query, digest, total):
-    offset = 0
-    if query.get("cursor") is not None:
-        try:
-            pin, number = query["cursor"].split(":")
-            offset = int(number)
-            if (
-                pin != digest
-                or str(offset) != number
-                or offset < 0
-                or offset > total
-                or offset % 256
-            ):
-                fail("identity_mismatch")
-        except ValueError, TypeError, AttributeError:
-            fail("identity_mismatch")
-    if query.get("metadata_sha256", digest) != digest:
-        fail("identity_mismatch")
-    return offset
-
-
-def perform(adapter, operation, selection, source, query, cancelled, deadline, check):
-    dto = adapter.service.get_saved_source(
-        selection["run_uuid"],
-        selection["execution_id"],
-        attempt=selection["attempt"],
-        calcjob_uuid=selection["calcjob_uuid"],
-        source_uuid=source["source_uuid"],
-        expected_source_sha256=source["source_sha256"],
-    )
-    check()
-    record, raws, plan_raw, series_raw, plan, series, captured = retained(dto, selection, source)
-
-    def frame(raw):
-        return len(raw).to_bytes(8, "big") + raw
-
-    metadata_sha = sha(
-        b"qcl-negf.portal-saved-nfs.v1\0"
-        + frame(canonical(selection))
-        + frame(canonical(source))
-        + frame(plan_raw)
-        + frame(series_raw)
-    )
-    brief = adapter.brief(
-        dict(
-            plan=plan,
-            series=series,
-            plan_source="aiida.input.plan",
-            source=dict(kind="nfs_registered", locator_id=source["source_uuid"]),
-        ),
-        selection=selection,
-        maximum_bytes=METADATA,
-    )
-    if len(_bytes(brief)) > METADATA:
-        fail("budget_exceeded")
-    offset = _cursor(query, metadata_sha, len(brief["points"]))
-    common = dict(
-        provider_selection=selection,
-        provider_source=source,
-        metadata_sha256=metadata_sha,
-        storage_binding_status="binding_configured_access_not_checked"
-        if adapter.binding
-        else "binding_unavailable",
-        snapshot_complete=record["snapshot"]["complete"],
-        registered_point_ids=list(captured),
-        repository_copied_bytes=0,
-        payload_temp_copied_bytes=0,
-        provider_measurements=dict(kernel_io="not_measured", rss="not_measured"),
-        metadata_status="verified",
-        copy_status=dto["copy_status"],
-        access_status="not_checked",
-    )
-    if operation == "brief":
-        page = [dict(p) for p in brief["points"][offset : offset + 256]]
-        for point in page:
-            pin = captured.get(point["point_id"])
-            point.update(
-                source_commit_sha256=pin["commit_sha256"] if pin else None,
-                source_commit_sha256_source="registered_sha256" if pin else None,
-                analysis_source_status="unregistered"
-                if pin is None
-                else "registered"
-                if pin["declared_analysis"]
-                else "owner_unavailable",
-                source_native_identity=pin["native_identity"] if pin else None,
-                source_calcjob_uuid=pin["source_calcjob_uuid"] if pin else None,
-            )
-        ids = {p["point_id"] for p in page}
-        return {
-            **brief,
-            **common,
-            "points": page,
-            "current_segments": [
-                [p for p in s if p in ids]
-                for s in brief["current_segments"]
-                if any(p in ids for p in s)
-            ],
-            "total": len(brief["points"]),
-            "complete_page": offset == 0 and len(page) == len(brief["points"]),
-            "next_cursor": f"{metadata_sha}:{offset + len(page)}"
-            if offset + len(page) < len(brief["points"])
-            else None,
-        }
-    point = captured.get(query["point_id"])
-    if point is None or (
-        operation not in ("diagnostics", "history") and point["declared_analysis"] is None
-    ):
-        fail("unavailable_storage")
-    if point["commit_sha256"] != query["source_commit_sha256"]:
-        fail("identity_mismatch")
-    binding = adapter.binding
-    if binding is None:
-        fail("unavailable_storage")
-    storage = record["storage"]
-    if (
-        any(not same(storage.get(k), binding[k]) for k in REFS)
-        or storage.get("computer_uuid") not in binding["allowed_computer_uuids"]
-    ):
-        fail("unavailable_storage")
-    relative = path(storage["relative_result_root"])
-    declarations(_json(raws[point["commit_path"]]), point["commit_path"], operation=operation)
-    native_expected = dict(point["native_identity"])
-    if operation in ("diagnostics", "history"):
-        native_expected = {
-            k: v
-            for k, v in native_expected.items()
-            if (k not in {"run_uuid", "calcjob_uuid"} or v is not None)
-            and k
-            in {
-                "point_id",
-                "execution_id",
-                "attempt",
-                "plan_fingerprint",
-                "run_uuid",
-                "calcjob_uuid",
-            }
-        }
-    request = dict(
-        provider_source=source,
-        binding=binding,
-        binding_sha256=sha(canonical(binding)),
-        relative_result_root=relative,
-        data_root=ROOT + "/" + relative,
-        commit_path=point["commit_path"],
-        commit_metadata=raws[point["commit_path"]].decode(),
-        expected_identity={
-            **native_expected,
-            "source_commit_sha256": point["commit_sha256"],
-        },
-    )
-    if operation == "slice":
-        request.update(view_id=query["view_id"], selection=query["selection"])
-    if operation == "history":
-        request.update(phase=query["phase"], selection=query["selection"])
-    spool = tempfile.TemporaryDirectory(prefix="qcl-saved-nfs-", dir="/tmp")
-    try:
-        check()
-        result = adapter.worker(operation, request, Path(spool.name), cancelled, deadline)
-        check()
-    except BaseException as error:
-        if getattr(error, "cleanup_unconfirmed", False):
-            adapter.closed = adapter.lease_cleanup_unconfirmed = True
-            adapter.pending_spools.append(spool)
-            spool = None
-        raise
-    finally:
-        if spool is not None:
-            try:
-                spool.cleanup()
-            except OSError:
-                adapter.closed = True
-                fail("unavailable_storage")
-    return {
-        **result,
-        **common,
-        "source_attempt": point["source_attempt"],
-        "point_id": point["point_id"],
-        "source_native_identity": point["native_identity"],
-        "source_calcjob_uuid": point["source_calcjob_uuid"],
-        "request_spool_bytes": len(_bytes({"operation": operation, **request})),
-        "total": len(result.get("views", [])),
-        "complete_page": True,
-        "next_cursor": None,
-    }
-
-
 def _unescape(value):
     return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), value)
 
@@ -728,78 +214,417 @@ def _access(alias, relative, paths, *, mountinfo=None):
     return result
 
 
-def child_access(request):
-    allowed = {
-        "operation",
-        "provider_source",
-        "binding",
-        "binding_sha256",
-        "relative_result_root",
-        "data_root",
-        "commit_path",
-        "commit_metadata",
-        "expected_identity",
-    }
-    if request.get("operation") == "slice":
-        allowed |= {"view_id", "selection"}
-    elif request.get("operation") == "history":
-        allowed |= {"phase", "selection"}
-    elif request.get("operation") not in ("manifest", "diagnostics"):
+# Native5 retained-point transport. Legacy registration/closure functions above
+# are not a native reader and are not dispatched by SavedResults.
+def _native_query(operation, query):
+    required = {"provider", "point_id", "native_binding_uuid", "state_manifest_sha256"}
+    extra = (
+        {"view_id", "selection", "source_state"}
+        if operation == "slice"
+        else {"stage", "fields", "maximum_records", "source_state", "cursor"}
+        if operation == "history"
+        else set()
+    )
+    if (
+        operation not in {"manifest", "diagnostics", "slice", "history"}
+        or set(query) != required | extra
+    ):
+        fail("selection_required")
+    if query["provider"] != "native_nfs":
         fail("unsupported_contract")
-    if set(request) != allowed:
+    if not isinstance(query["point_id"], str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", query["point_id"]
+    ):
         fail("selection_required")
-    expected = request["expected_identity"]
-    if not isinstance(expected, dict) or not {
-        "point_id",
-        "execution_id",
-        "attempt",
-        "plan_fingerprint",
-        "source_commit_sha256",
-    } <= set(expected):
+    uuid(query["native_binding_uuid"])
+    try:
+        digest(query["state_manifest_sha256"])
+    except SavedResultError:
         fail("selection_required")
-    if type(expected["attempt"]) is not int or expected["attempt"] < 1:
-        fail("selection_required")
-    digest(expected["plan_fingerprint"])
-    digest(expected["source_commit_sha256"])
-    if request["operation"] == "slice":
-        if not isinstance(request["view_id"], str) or not re.fullmatch(
-            r"[A-Za-z0-9_]{1,128}", request["view_id"]
+    if operation == "slice":
+        if not isinstance(query["view_id"], str) or not re.fullmatch(
+            r"[A-Za-z0-9_]{1,128}", query["view_id"]
         ):
             fail("selection_required")
-        selection = request["selection"]
-        if not isinstance(selection, list) or not 1 <= len(selection) <= 2:
+        if not isinstance(query["selection"], list) or not 1 <= len(query["selection"]) <= 2:
             fail("selection_required")
-        for item in selection:
-            if type(item) is int and item >= 0:
+        for item in query["selection"]:
+            if type(item) is int and 0 <= item <= 9007199254740991:
                 continue
             if (
-                not isinstance(item, dict)
+                type(item) is not dict
                 or set(item) != {"start", "stop", "step"}
-                or any(type(v) is not int for v in item.values())
-                or not 0 <= item["start"] < item["stop"]
+                or any(type(v) is not int or not 0 <= v <= 9007199254740991 for v in item.values())
+                or item["start"] >= item["stop"]
                 or item["step"] < 1
             ):
                 fail("selection_required")
-    if request["operation"] == "history":
-        from .saved_results import _history_selection
+    if operation == "history":
+        if (
+            query["stage"] not in ("scba", "outer")
+            or not isinstance(query["fields"], list)
+            or not 1 <= len(query["fields"]) <= 16
+            or any(not isinstance(v, str) or not v or len(v) > 128 for v in query["fields"])
+            or len(set(query["fields"])) != len(query["fields"])
+            or type(query["maximum_records"]) is not int
+            or not 1 <= query["maximum_records"] <= 256
+            or (query["cursor"] is not None and type(query["cursor"]) is not dict)
+        ):
+            fail("selection_required")
+    if operation in ("slice", "history") and type(query["source_state"]) is not dict:
+        fail("selection_required")
+    return dict(query)
 
-        _history_selection(request.get("phase"), request.get("selection"))
+
+def _native_point(dto, selection, query):
+    """Check detached original owner relations; this never grants data access."""
+    from qcl_negf_contracts import schema_validator
+
+    try:
+        if (
+            type(dto) is not dict
+            or set(dto)
+            != {
+                "status",
+                "point",
+                "binding",
+                "result_utf8",
+                "native_result",
+                "native_binding",
+                "integrity",
+            }
+            or dto["status"] != "available"
+        ):
+            fail("unsupported_contract")
+        _bytes(dto)
+        binding, point = dto["binding"], dto["point"]
+        if (
+            binding.get("schema") != "qcl-negf.aiida-native-binding.v1"
+            or not same(binding["selection"], selection)
+            or point["point_id"] != query["point_id"]
+            or dto["native_binding"]["node_uuid"] != query["native_binding_uuid"]
+            or [p for p in binding["points"] if p["point_id"] == query["point_id"]] != [point]
+        ):
+            fail("identity_mismatch")
+        for key in ("native_result", "native_binding"):
+            pin = dto[key]
+            if type(pin) is not dict or set(pin) != {"node_uuid", "bytes", "sha256"}:
+                fail()
+            stored_uuid(pin["node_uuid"])
+            digest(pin["sha256"])
+            if not isinstance(pin["bytes"], str) or not re.fullmatch(
+                r"0|[1-9][0-9]{0,19}", pin["bytes"]
+            ):
+                fail()
+        raw = dto["result_utf8"].encode("utf-8")
+        raw_ref = dict(bytes=str(len(raw)), sha256=sha(raw))
+        if raw_ref != binding["raw_result"] or any(
+            raw_ref[k] != dto["native_result"][k] for k in raw_ref
+        ):
+            fail("identity_mismatch")
+        if dto["integrity"] != dict(
+            native_contexts="not_reverified",
+            current_access="not_checked",
+            scientific_acceptance="not_assessed",
+        ):
+            fail()
+        if binding["integrity"] != dict(
+            scope="selected_metadata",
+            native_contexts="verified",
+            transport_owner="verified",
+            full_core_payloads="not_assessed",
+            current_access="not_checked",
+        ):
+            fail("unsupported_contract")
+        source = point["source"]
+        validator = schema_validator("outward-result.schema.json")
+        validator.evolve(
+            schema={"$ref": "#/$defs/NativePointSource", "$defs": validator.schema["$defs"]}
+        ).validate(source)
+        if source["kind"] == "absent":
+            fail("capability_unavailable")
+        state = source["selected_state"]
+        if (
+            state["identity"]["execution_id"] != selection["execution_id"]
+            or state["identity"]["point_id"] != query["point_id"]
+        ):
+            fail("identity_mismatch")
+        if state["manifest"]["sha256"] != query["state_manifest_sha256"] or (
+            "source_state" in query and not same(query["source_state"], state)
+        ):
+            fail("identity_mismatch")
+        return point, source
+    except SavedResultError:
+        raise
+    except (KeyError, IndexError, TypeError, AttributeError, UnicodeError, ValueError) as exc:
+        raise SavedResultError("corrupt_result") from exc
+    except Exception as exc:
+        raise SavedResultError("corrupt_result") from exc
+
+
+def native_perform(adapter, operation, selection, query, cancelled, deadline, check):
+    query = _native_query(operation, dict(query))
+    method = getattr(adapter.service, "get_native_result_source", None)
+    if not callable(method):
+        fail("unsupported_contract")
+    dto = method(
+        selection["run_uuid"],
+        selection["execution_id"],
+        attempt=selection["attempt"],
+        calcjob_uuid=selection["calcjob_uuid"],
+        point_id=query["point_id"],
+        binding_uuid=query["native_binding_uuid"],
+    )
+    check()
+    point, source = _native_point(dto, selection, query)
+    binding = adapter.binding
+    if binding is None:
+        fail("unavailable_storage")
+    storage = dto["binding"]["storage"]
+    if (
+        any(storage.get(k) != binding[k] for k in REFS)
+        or storage.get("computer_uuid") not in binding["allowed_computer_uuids"]
+    ):
+        fail("unavailable_storage")
+    relative = path(storage["relative_execution_root"])
+    artifact = source["artifact_root"]
+    if artifact != ".":
+        relative = path(relative + "/" + path(artifact))
+    request = dict(
+        binding=binding,
+        binding_sha256=sha(canonical(binding)),
+        relative_root=relative,
+        state_ref=source["selected_state"],
+        source=source,
+        query=query,
+    )
+    spool = tempfile.TemporaryDirectory(prefix="qcl-native-selected-")
+    primary = None
+    try:
+        check()
+        result = adapter.worker(operation, request, Path(spool.name), cancelled, deadline)
+        check()
+        answer = dict(
+            schema="qcl-negf.portal-selected-reader.v2",
+            operation=operation,
+            provider_selection=selection,
+            provider="native_nfs",
+            selection_mode="retained",
+            source_state=source["selected_state"],
+            retained=dict(
+                native_result=dto["native_result"],
+                native_binding=dto["native_binding"],
+                creator=point["creator"],
+                integrity=dict(
+                    readback=dto["integrity"], original_binding=dto["binding"]["integrity"]
+                ),
+            ),
+            access=result["access"],
+            view=result["view"],
+        )
+        _bytes(answer)
+        return answer
+    except BaseException as exc:
+        primary = exc
+        if getattr(exc, "cleanup_unconfirmed", False):
+            adapter.closed = adapter.lease_cleanup_unconfirmed = True
+            adapter.pending_spools.append(spool)
+            spool = None
+        raise
+    finally:
+        if spool is not None:
+            try:
+                spool.cleanup()
+            except OSError as exc:
+                adapter.closed = adapter.lease_cleanup_unconfirmed = True
+                adapter.pending_spools.append(spool)
+                if primary is not None:
+                    primary.cleanup_unconfirmed = True
+                else:
+                    error = SavedResultError("unavailable_storage")
+                    error.cleanup_unconfirmed = True
+                    raise error from exc
+
+
+def _mountinfo():
+    with open("/proc/self/mountinfo", encoding="utf-8") as stream:
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw.encode()) > 1024 * 1024:
+        fail("budget_exceeded")
+    return raw
+
+
+class _NativeDomain:
+    """Actual child-owned nofollow ancestry FDs and immutable mount domain."""
+
+    def __init__(self, binding, relative):
+        self.fds = []
+        self.mounts = _mountinfo()
+        self.namespace = os.stat("/proc/self/ns/mnt").st_ino
+        self.root = _access(binding["root"], relative, [], mountinfo=self.mounts)
+        alias = Path(binding["root"])
+        for line in self.mounts.splitlines():
+            try:
+                mp = Path(_unescape(line.split(" - ", 1)[0].split()[4]))
+            except IndexError, ValueError:
+                fail("unavailable_storage")
+            if (
+                mp != alias
+                and alias in mp.parents
+                and (mp == self.root or self.root in mp.parents or mp in self.root.parents)
+            ):
+                fail("unavailable_storage")
+        try:
+            fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            self.fds.append((Path("/"), fd, self._stamp(os.fstat(fd))))
+            current = Path("/")
+            for part in self.root.parts[1:]:
+                fd = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd
+                )
+                current = current / part
+                self.fds.append((current, fd, self._stamp(os.fstat(fd))))
+            self.check()
+        except BaseException as primary:
+            try:
+                self.close()
+            except BaseException:
+                primary.cleanup_unconfirmed = True
+            raise
+
+    @staticmethod
+    def _stamp(info):
+        return info.st_dev, info.st_ino, info.st_mode
+
+    def check(self):
+        try:
+            if _mountinfo() != self.mounts or os.stat("/proc/self/ns/mnt").st_ino != self.namespace:
+                fail("source_changed")
+            for p, fd, stamp in self.fds:
+                if (
+                    self._stamp(os.fstat(fd)) != stamp
+                    or self._stamp(p.stat(follow_symlinks=False)) != stamp
+                ):
+                    fail("source_changed")
+        except OSError as exc:
+            raise SavedResultError("source_changed") from exc
+
+    def close(self):
+        error = None
+        while self.fds:
+            _, fd, _ = self.fds.pop()
+            try:
+                os.close(fd)
+            except OSError as exc:
+                error = exc
+        if error is not None:
+            result = SavedResultError("unavailable_storage")
+            result.cleanup_unconfirmed = True
+            raise result from error
+
+
+def native_read_request(request):
+    """Only the existing isolated child opens native bytes; owners close here."""
+    from dataclasses import asdict
+
+    from qcl_negf_results.diagnostic_views import (
+        HistoryViewRequest,
+        describe_saved_diagnostics,
+        read_saved_history,
+    )
+    from qcl_negf_results.saved_views import describe_saved_views, read_saved_view
+    from qcl_negf_results.state import ResultReadLimits, StateReader
+
+    if set(request) != {
+        "operation",
+        "binding",
+        "binding_sha256",
+        "relative_root",
+        "state_ref",
+        "source",
+        "query",
+    }:
+        fail("selection_required")
+    operation = request["operation"]
+    query = _native_query(operation, request["query"])
     binding = validate_binding(request["binding"])
     if sha(canonical(binding)) != request["binding_sha256"]:
         fail("identity_mismatch")
-    source, extra = provider(request["provider_source"])
-    if extra or source["provider"] != "nfs_registered":
-        fail("selection_required")
-    relative = path(request["relative_result_root"])
-    if request["data_root"] != ROOT + "/" + relative:
+    source = request["source"]
+    state = request["state_ref"]
+    if (
+        not same(source["selected_state"], state)
+        or state["manifest"]["sha256"] != query["state_manifest_sha256"]
+        or ("source_state" in query and not same(query["source_state"], state))
+    ):
         fail("identity_mismatch")
-    commit_path = path(request["commit_path"])
-    raw = request["commit_metadata"].encode("utf-8")
-    if len(raw) > METADATA:
-        fail("budget_exceeded")
-    if sha(raw) != request["expected_identity"]["source_commit_sha256"]:
-        fail("identity_mismatch")
-    closure, owner = declarations(_json(raw), commit_path, operation=request["operation"])
-    if owner is None and request["operation"] != "diagnostics":
-        fail("unsupported_contract")
-    return _access(binding["root"], relative, [commit_path, *closure])
+    relative = path(request["relative_root"])
+    domain = None
+    primary = None
+    try:
+        domain = _NativeDomain(binding, relative)
+        limits = ResultReadLimits(
+            maximum_metadata_bytes=METADATA,
+            maximum_io_bytes=128 * 1024 * 1024,
+            maximum_catalog_pages=4096,
+            maximum_catalog_entries=4096,
+            maximum_catalog_bytes=METADATA,
+            maximum_open_files=4,
+            maximum_batch_bytes=METADATA,
+            maximum_record_bytes=METADATA,
+            maximum_batch_records=256,
+            maximum_hdf_objects=4096,
+            maximum_array_bytes=METADATA,
+        )
+        with StateReader(
+            domain.root, state_ref=state, expected_identity=state["identity"], limits=limits
+        ) as reader:
+            if operation in ("manifest", "slice"):
+                if source["kind"] != "final" or source["observations"] is None:
+                    fail("capability_unavailable")
+                if operation == "manifest":
+                    view = describe_saved_views(reader, artifact_ref=source["observations"])
+                else:
+                    view = read_saved_view(
+                        reader,
+                        query["view_id"],
+                        query["selection"],
+                        artifact_ref=source["observations"],
+                    )
+            elif operation == "diagnostics":
+                view = describe_saved_diagnostics(reader)
+            else:
+                reader.import_history()
+                view = asdict(
+                    read_saved_history(
+                        reader,
+                        HistoryViewRequest(
+                            query["stage"], tuple(query["fields"]), query["maximum_records"]
+                        ),
+                        cursor=query["cursor"],
+                    )
+                )
+        # No owner handle escapes. A changed mount/root after close refuses bytes.
+        domain.check()
+        result = dict(
+            view=view,
+            access=dict(
+                status="checked_ro_current_request",
+                method="local_binding_mountinfo_nofollow_domain",
+                config_sha256=request["binding_sha256"],
+            ),
+        )
+        _bytes(result)
+        return result
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        if domain is not None:
+            try:
+                domain.close()
+            except BaseException:
+                if primary is not None:
+                    primary.cleanup_unconfirmed = True
+                else:
+                    raise

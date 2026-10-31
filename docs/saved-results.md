@@ -1,270 +1,108 @@
-# Saved transport repository views
+# Native5 retained point reads
 
-The run detail includes **Сохранённый транспорт**. Select an exact execution,
-attempt and CalcJob, then explicitly choose a provider. Retrieved repository
-keeps the original flow; registered NFS requires loading the retained catalogue
-and choosing its exact source UUID/SHA (even a single entry has no default).
-Then read metadata, select a point/commit,
-describe semantic views and request native indices or ranges. Historical failed
-attempts remain selectable. No first-child, latest-file or matching-title default
-is used. Owning Results accepts exact positive source row attempts up to the
-selected provider attempt, retaining older completed rows and explicit borrowed
-checkpoint sources without rewriting their attempt metadata. Plan definition/variant mapping comes from the retained source plan.
-No solver, optical calculation, export archive or derived scientific job starts.
+The light **Сохранённый транспорт native5** panel reads an explicitly selected
+retained native point. Select the exact execution/transport attempt/CalcJob and
+frozen point, then supply its original native binding UUID and selected manifest
+SHA-256 from the owning provenance record. These are constraints, not access
+authority. There is no first/latest binding or native attempt default.
 
-The retrieved provider uses existing AiiDA repository owner-thread operations.
-The optional registered NFS provider consumes retained AiiDA L1 source records
-and uses the same bounded Results child on the Platform read-only alias. It
-never registers sources or copies the analysis owner into temporary storage.
-Actual namespace BIND, read access, source quiescence and retained closure hold
-remain administrative/native prerequisites; source implementation does not
-establish these facts or close L2/R04. Existing retrieval and protected
-calculations are untouched. There is no browser host path or provider URI input.
+The original AiiDA getter is
+`get_native_result_source(run_uuid, execution_id, *, attempt, calcjob_uuid,
+point_id, binding_uuid=None)`. It runs on the existing profile owner and returns
+bounded detached metadata. The actor rechecks original node/raw relations. Its
+`current_access=not_checked` and `native_contexts=not_reverified` markers remain
+unchanged; an available historical DTO does not grant current storage access.
 
-## Authenticated semantic API
+Native `Identity` has exactly `run_id`, `execution_id`, `point_id`, decimal-string
+`attempt`, `branch_id`, `model_sha256`, `plan_sha256`. It is distinct from AiiDA's
+run/CalcJob UUIDs and integer input attempt. Native attempt is never stamped from,
+or ordered against, the transport attempt. A full immutable `StateRef` pins its
+identity, state ID/sequence and manifest FileRef. Counts and byte sizes remain
+canonical decimal strings.
 
-All endpoints require bearer authentication and use no-store:
+## Existing authenticated routes
 
-- `GET /api/v1/runs/{run_uuid}/saved-results/sources` (retained catalogue)
-- `GET /api/v1/runs/{run_uuid}/saved-results/brief`
-- `GET /api/v1/runs/{run_uuid}/saved-results/manifest`
-- `POST /api/v1/runs/{run_uuid}/saved-results/slice`
+All routes require bearer authentication and use no-store. Retained metadata GETs
+accept exactly `execution_id`, positive `attempt`, `calcjob_uuid`,
+`provider=native_nfs`, `point_id`, `native_binding_uuid`,
+`state_manifest_sha256`. Unknown or duplicate selectors are refused.
 
-Catalogue requires only the exact four-field selection and rejects other query keys.
-It returns a complete bounded list (at most 256) with actual copy status and
-access `not_checked`; corrupt/oversized catalogues fail as a whole.
+- `GET /api/v1/runs/{run_uuid}/saved-results/manifest` describes stored views.
+- `GET /api/v1/runs/{run_uuid}/saved-results/diagnostics` describes native history.
+- `POST /api/v1/runs/{run_uuid}/saved-results/slice` adds the complete authorized
+  `source_state`, explicit `view_id`, and native `selection` (one index or positive
+  start/stop/step range per logical axis).
+- `POST /api/v1/runs/{run_uuid}/saved-results/history` adds `source_state`,
+  `stage=scba|outer`, direct IEEE `fields`, `maximum_records` (1–256), and nullable
+  canonical `cursor`. This is consumed event count, not filtered display row count.
 
-GETs require explicit `execution_id`, positive `attempt`, full `calcjob_uuid`.
-Brief accepts an optional opaque `cursor`. Manifest additionally requires
-`point_id`, `source_commit_sha256`, `metadata_sha256`. Slice accepts only these
-seven provenance selectors plus semantic `view_id` and native `selection`; run
-UUID stays in the URL. Selection names every semantic axis as a zero-based
-integer or `{start,stop,step}` (exclusive stop, positive step). No clipping,
-sampling choice, unit conversion or numerical default is introduced by Portal.
-Complex real/imaginary components are distinct explicit view IDs from Results.
+Responses use `qcl-negf.portal-selected-reader.v2`: exact `provider_selection`,
+`provider=native_nfs`, `selection_mode=retained`, full `source_state`, original
+retained node pins/creator and two distinct integrity projections:
+`retained.integrity.readback` copies the getter limitations, while
+`retained.integrity.original_binding` copies the historical binding marker
+(`selected_metadata`, native contexts/transport owner verified, full core payloads
+not assessed, current access not checked). Neither scope upgrades the other.
+A separate request-local `access` observation,
+and the unmodified owning `view`. Native `views` is a dictionary. State echoes
+are compared in full, not only by hash. Old commit/index/phase row-range request
+shapes are refused, with no scientific v4 adapter.
 
-Responses retain the owning Results DTO and add `provider_selection` (exact
-retrieved attempt), `metadata_sha256`, `source_attempt`, transport limits/copy
-counters and page metadata. The nested slice `selection.attempt` is the saved
-source attempt: a borrowed checkpoint is not relabelled as the provider attempt.
-All recorded native identities must match the expected binding when present;
-genuinely missing legacy provider fields are disclosed by Results. Source
-revisions are retained provenance, never the current Portal checkout revision.
+The child uses public `StateReader`, exact final-observations FileRef and
+`AnalysisReader` facades. Diagnostics/history use `DiagnosticReader` and
+`HistoryViewRequest`; catalog import is explicit. A checkpoint-only source can
+have diagnostics/history while final views remain unavailable. No first
+`physics.analysis` role match chooses between final diagnostics and observations.
 
-The provider pins exact plan and `result/series_result.json` bytes plus selection
-in `metadata_sha256`. It follows only the row's explicit `data.result_commit`,
-then the selected commit's single declared `physics.analysis` and its declared
-JSON dependency closure. If the series omits a commit SHA, brief captures only
-that page's declared small commit bytes and labels the resulting digest
-`provider_captured_sha256`; a recorded digest is labelled `series_recorded`.
-This is a transport pin, not scientific acceptance. A changed metadata digest
-or commit SHA returns identity_mismatch and requires refreshing the selection.
-No directory scan chooses an analysis file; no full-state fallback is opened.
+## Access and lifetime
 
-Brief is an owning Results metadata projection and never calls the HDF reader.
-Its point pages contain at most 256 rows and `next_cursor`, `total`,
-`complete_page`. Cursors contain the same metadata digest and explicit offset;
-a later page cannot silently use new plan/series bytes. Commit pins are separate
-from this series snapshot. Pages are shown individually; J(V) is never joined
-across page boundaries. Manifest's finite semantic view list also reports page
-fields (the current allowlist fits one page). A partial page is labelled partial.
+Only the existing isolated child opens scientific bytes. Server-configured
+immutable binding fixes the RO NFS4 alias and allowed storage/computer/retention
+identities. The parent compares the original execution-relative root and exact
+source path against that binding; paths are never HTTP inputs or outputs.
 
-## Bounds and lifetime
+The child checks the actual mount namespace and mountinfo, nofollow ancestry,
+and the entire selected artifact-root mount subtree. Descendant or intervening
+submounts are refused, including apparently compatible mounts. It holds parent
+and root directory FDs, then rechecks mount records, namespace and FD/path
+identities after the public readers have closed and before publishing a response.
+This relies on trusted mount administration and requires separate native
+qualification; immutable config and synthetic mount fixtures do not prove it.
 
-One analysis request is active at a time per existing single API worker. A busy
-request refuses without queue/retry. The ten-second monotonic deadline includes
-selection, metadata, owner copy and analysis; cancellation/disconnect/timeout
-signals cooperative repository-copy cancellation. Existing actor I/O can outlive
-a caller deadline: its owner-thread lease must close before cleanup and gate
-release, so this is not a guaranteed ten-second kernel termination promise.
-Caller cleanup waits at most one additional second; shutdown also uses this
-bounded wait. If storage/actor I/O remains stalled, the actual concurrent future,
-gate, leases and temporary inputs remain owned until real completion and further
-saved reads fail closed. No cancelled asyncio waiter is mistaken for completion.
-A cleanup failure disables further saved reads; existing run/configurator/card
-routes remain separate. Kernel D-state termination cannot be promised.
+The existing one-request gate, ten-second deadline, bounded subprocess streams,
+CPU/AS/file limits, cancellation, kill/reap and deferred cleanup remain. Child
+imports bind the same selected Portal/Results/Contracts package roots as its
+parent. Cleanup uncertainty preserves the primary error and permanently closes
+further admission; a caller timeout is not successful backend termination.
 
-Wrapper future completion does not prove actor lease cleanup. The Portal actor's
-optional close observer reports every actual CloseResult even if an original
-read error is preserved, and unknown artifact acquisition is also disclosed.
-Any pending, failed or unknown close permanently disables this optional consumer
-and retains its busy marker. Later actual actor cleanup cannot automatically
-reenable it. The actor continues to own exact-once physical context exit; the
-consumer adds no polling of ORM state, force-close or second execution owner.
-This also covers a quick metadata read whose context exit exceeds the actor's
-short close-response deadline while the saved future itself has already ended.
+Owner read limits bound metadata/catalog/array allocation, I/O, object inventory,
+cells, lines and state subsets. A small slice may still require a whole selected
+owner SHA pass. No arrays/grids are reduced to fit. Logical/process limits are
+not a claim about measured RSS, native allocator cost or cluster resources.
 
-The provider checks inventory size and declaration before copying payloads:
-metadata totals at most 1 MiB (retained plan, series, selected commit/dependencies),
-selected analysis owner at most 64 MiB, logical temporary admission at most
-128 MiB, final JSON at most 2 MiB. Only that owner and its required small JSON
-closure enter a private temporary directory. Each copied owner/dependency is
-verified against declared size and SHA before local analysis. Repository leases
-close in context managers and temporary files are removed after child completion,
-including cancellation and exceptions. These are ordinary logical-byte guards,
-not filesystem quotas or measured physical I/O.
+## Scientific presentation
 
-Describe/slice use a fixed internal one-shot Python process in the existing
-prepared package. Before loading the owning Results reader, it sets one allowed
-CPU affinity, CPU-time limit ten seconds, virtual address-space limit 512 MiB
-and finite output-file limit. Its environment contains only locale/PATH and
-one-thread BLAS/OMP settings. Parent concurrently drains stdout/stderr with
-2 MiB/4 KiB bounds and kills/reaps the process group on cancellation, deadline,
-overflow or exit before deleting temporary inputs. No shell, preexec hook,
-sudo, service, installation or dependency fallback is involved. AS is not RSS;
-this cap may refuse a prepared runtime whose mappings exceed it. No cap is
-raised automatically. Kernel I/O/RSS remain `not_measured` in disclosure.
+Signed native values, negative zero, null with exact invalid masks, native axes,
+quadrature/scales, basis/gauge, raw assessments and original source identities
+remain visible. Population fractions use only owning saved inputs. History keeps
+original canonical records, IEEE bits, exact decimal coordinates, missing reasons,
+unit changes, witness updates and owning breaks. Unsafe numerical display
+coordinates stay in the raw table; the UI never rounds them for a curve.
 
-Owning `SavedViewLimits` additionally enforce selected allocation 1 MiB including
-coordinates/weights, cells 65,536, lines 4,096, wave/population states 12, matrix
-subsets 64×64 and finite native object inventory. The Results reader separately
-charges owner SHA and HDF delivery. `repository_copied_bytes` reports provider
-copy cost; it must not be confused with only the returned selected payload or
-with Results' I/O counters. A small slice can require a whole selected-owner
-copy/SHA pass. Oversized data returns budget_exceeded and may require an explicit
-smaller selection; Portal never reduces a scientific grid or modifies raw data.
+Readiness, process exit, convergence, physics, discretization and experimental
+validation remain separate. GET and graphs do not run solve, derive or scientific
+acceptance. Static or configurator preview data never replaces a retained used
+snapshot.
 
-## Display and scientific boundaries
+## Remaining producer gates
 
-J(V) segments are supplied by Results from the complete frozen point order.
-Missing J, missing planned rows, failed/unaccepted rows and branch changes retain
-gaps; unaccepted/unknown currents appear as isolated diamond markers. Portal
-does not recompute acceptance. Current convention is positive electron flow
-along +z; no monotonicity or bias symmetry is asserted.
+This increment implements R2 retained explicit-point reads only. Execution-wide
+sources/brief (R1), native current bootstrap (R3), genuine retrieved rooted
+snapshot (R4), and available native performance (R5) retain their separate owning
+producer contracts. Sources/brief return explicit unsupported-contract staging;
+no old-format fallback fills these gaps. Human/agent report read/attach remains
+available. Explicit derive/comparison and actual used-value help remain separate.
 
-Potential/density plots retain saved units, signed finite values and native axes.
-Spatial-energy density is n(E,z), not spectral A(z,E). Trace spectra keep an
-explicit k selection. Heatmap cell boundaries are presentation midpoints between
-nonuniform saved coordinate centers, not integration weights. Negative/positive
-values use signed colors; finite zero differs from native NaN/+Inf/-Inf (null
-with an exact invalid mask/reason). Raw native cell tables are available in pages. SVG positions divide by a finite
-domain scale before subtraction, so opposite signed extremes and huge singleton
-line/bar values do not overflow their display coordinates. Midpoint edges use
-half-sums; any unrepresentable/indistinguishable cell boundary gives an explicit
-Graph unavailable message with the unchanged ordered value/axis/mask table.
-Every generated position is checked finite before SVG creation. This changes
-only screen geometry, never native values, units, selected cells or physical
-normalization.
-
-Wavefunctions keep saved state IDs, explicit real/imag component, basis and gauge.
-Their curves do not match degenerate states across variants. Effective levels
-are saved projected k=0 Hamiltonian levels, not interacting spectral peaks.
-Population bars/table show saved real diagonals in the named basis; complex
-matrix components remain separately selectable. Fractions and their denominator
-are displayed only as returned by Results from saved ionized target-doping
-inputs. Portal never normalizes by a selected subset or invents a donor density.
-Missing target inputs leave raw populations available and fractions unavailable.
-
-Raw process/point/converged/quality/assessment fields remain separate from
-metadata/SHA integrity, rendering, discretization and experimental validation.
-Missing fields stay unknown. `scientific_accepted:false` is not reinterpreted as
-proof of a physics failure. Renderer readiness and exact transport do not
-establish scientific acceptance.
-
-`QCL_NEGF_SAVED_RESULTS_ENABLED=false` disables this optional consumer; the default
-is enabled and unsupported/missing producer/storage returns an honest refusal.
-No server activation or historical artifact readiness is established by source.
-Focused synthetic backend/frontend controls live in `tests/test_saved_results*.py`
-and `frontend/tests/saved-results*.test.ts`; run only in the separately prepared,
-finite shared verification gate, without package installation or production HDF.
-
-
-## Registered NFS L1 binding and identities
-
-Old requests without `provider` retain `aiida_retrieved` behavior and the exact
-old metadata digest. Explicit retrieved provider rejects source UUID/SHA fields.
-`nfs_registered` requires both canonical lowercase `source_uuid` and
-`source_sha256`. These accompany every brief/manifest query and slice body.
-Every response repeats `provider_source`; source swaps, including equal record
-SHA with different UUID, invalidate metadata SHA/cursor and frontend generation.
-No source, provider or repository fallback follows an identity/access error.
-
-Catalogue and NFS brief use only retained AiiDA records/UTF-8 plan and metadata.
-They do not stat/resolve/open the data alias, inspect mountinfo or open HDF.
-Exact bytes and descriptor hashes are verified before the owning Results brief.
-NFS metadata SHA is SHA256 of the `qcl-negf.portal-saved-nfs.v1\0` domain followed
-by 8-byte big-endian length-framed canonical selection, canonical provider_source,
-original input-plan bytes and retained series bytes. Raw plan is not reserialized.
-Registered incomplete snapshots show every frozen scalar/status/gap; only captured
-record points receive analysis action pins. `snapshot_complete` is independent
-of page completeness and scientific acceptance. Reserved `_aiida/` metadata
-participates in source digest but never becomes an NFS pathname/dependency.
-
-`provider_selection` remains the selected current AiiDA child. The source native
-identity and explicit source CalcJob relation are projected separately. Expected
-identity for Results comes from the registered native commit, with its SHA.
-Imported/borrowed source attempt1 stays attempt1 under provider attempt2. Missing
-native run/CalcJob UUID stays null in slice selection; it is never stamped from
-the current child. Frontend checks native identity against the pinned brief and
-manifest while retaining strict retrieved selection validation.
-
-`QCL_NEGF_SAVED_RESULTS_BINDING_FILE` is optional. At startup the API snapshots
-only an immutable canonical regular root-owned `/nix/store/...` JSON file, no
-symlink, no group/other write, at most 16 KiB. The exact eight fields are
-`namespace_id`, `storage_identity`, `root`, `allowed_computer_uuids`,
-`retention_policy_id`, `retention_owner_id`, `hold_ref`, `access_binding_ref`.
-Root is exactly `/run/qcl-negf-saved`. Missing/invalid binding disables NFS payload
-access while catalogue, retained brief and retrieved views remain independent.
-All six identity/retention refs and computer allowlist are matched before spawn.
-Private binding refs and absolute paths are not sent to the browser.
-
-Only the bounded child probes mountinfo and requested path ancestry. It requires
-an exact read-only NFSv4 alias, rejects symlinks and foreign/RW nested mappings,
-and gives the actual committed path to owning Results `AnalysisReader` with its
-final nofollow regular-file checks. Request JSON lives in a private local `/tmp`
-spool; data root is the server-built alias plus stored relative result root.
-Repository copied bytes and payload temp copied bytes are zero. Small request
-spool bytes and Results logical delivered I/O counters are distinct from storage
-copy, network or kernel accounting. Slice can hash the full <=64 MiB owner even
-for a small selection; manifest does not claim owner SHA/full native validation.
-
-Catalogue, brief and both payload providers share one admission slot. Unknown
-actor completion or unconfirmed child cleanup permanently disables this optional
-consumer. Unreaped child ownership retains its local spool; a completed waiter
-never proves cleanup. Hard NFS kernel I/O can outlive SIGKILL/HTTP deadline, and
-no replacement child is admitted. Limits remain wall10s, one CPU, CPU10s,
-AS512MiB (virtual address space, not RSS), metadata1MiB, owner64MiB, delivered
-I/O128MiB, selected data1MiB/65536 cells, response2MiB and stderr4KiB. Actual native
-mount/ACL/storage witness, no writer/rename/prune and whole closure/borrowed root
-hold require a separate BIND packet. No native NFS, full GUI or science acceptance
-follows from source controls.
-
-## S07: saved diagnostics, not live monitoring
-
-Explicit `GET .../saved-results/diagnostics` and `POST .../saved-results/history`
-share the existing authenticated/no-store exact provider/source/point/commit/
-metadata pins, gate, child, time/capture limits and cleanup fence. History body
-adds only `phase:scba|outer` and exact `{start,stop,step,columns}`: no implicit
-tail/latest/read-all, clipping, export, materialize or solve. At most512 selected
-rows and16 distinct native value columns. Coordinates are always native sequence,
-iteration, SCBA outer_iteration and recorded source attempt, never row-index
-substitutes. Missing units remain unknown. ExactScalar integer tags are kept as
-exact decimal text; plots never coerce large tagged coordinates/values to Number.
-
-The new role is only the selected `science.history`/native-v4 declared closure.
-A failed point without analysis remains a useful diagnostic source. Missing or
-ambiguous history yields an explicit unavailable descriptor while point-commit
-checkpoint metadata can still be displayed. Unsupported/oversized unselected
-analysis is not a prerequisite for this read. NFS `declared_analysis` remains
-its original registration meaning/hash; it is not renamed to history. Retained
-brief preserves this relation without opening analysis; selected operations
-perform their own owner/closure admission. Source native identity, including a
-borrowed/imported attempt and absent UUID, remains distinct from provider child.
-
-Only a descriptor followed by explicit phase/columns/row-range action reads
-values. Manual refresh stays on the same pinned commit; no polling/live claim.
-Tables retain signed values, masks, exact counters, closed-null unknown and raw
-failed/convergence/acceptance statuses. Optional SVG uses owning break_before
-and separates cycles/attempts/gaps/invalid samples; step>1 never joins omitted
-rows. Source/token/point switches fence late success/error and reset views.
-
-Descriptor checks metadata; history read verifies full selected owner SHA plus
-selected native coordinates, not full coordinate inventory/scientific acceptance.
-Limits remain metadata1MiB/owner64MiB/delivered I/O128MiB/selected1MiB/JSON2MiB,
-objects4096/source entries4096 and the existing one-child wall10s/CPU1/AS512MiB
-virtual-address limit (not RSS). Hard I/O/reap uncertainty remains fail-closed.
-Checkpoint payload seconds/bytes and explicit inclusion/JIT flags are shown only
-as recorded; they are not job wall/CPU cost or remaining allocated grant.
-Performance summary remains unavailable/source_binding_missing until an exact
-retained summary binding exists. No newest performance index or unbound session
-is searched. Native BIND, full live/resource accounting and science remain separate.
+Synthetic tests exercise public native5 readers, actual isolated child cleanup,
+API transport and light source/SSR controls with explicitly synthetic RO facts.
+They do not establish actual NFS/profile/installed/browser or scientific acceptance.

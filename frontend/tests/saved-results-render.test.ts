@@ -39,8 +39,8 @@ test('explicit state and component rendering preserves basis, populations and so
  for(const value of ['Saved state populations','state 3: -2','state 7: 9','saved_target_doping_unavailable','effective'])assert.ok(html.includes(value),value);
  assert.doesNotMatch(html,/sum of selected|normalized to 1|<script>/);
  const initial=renderToStaticMarkup(createElement(ui.SavedResultsPanel,{token:'secret',run:{uuid:'run',children:[{uuid:'job',execution_id:'ex',attempt:2}]}}));
- assert.match(initial,/Select provider explicitly/);assert.match(initial,/Registered retained NFS source/);
- assert.doesNotMatch(initial,/<option selected="" value="nfs_registered"/);
+ assert.match(initial,/Exact frozen point/);assert.match(initial,/Original native binding UUID/);assert.match(initial,/R1/);
+ assert.doesNotMatch(initial,/first child|latest file/);
  assert.match(initial,/Select explicitly/);assert.doesNotMatch(initial,/secret|Bearer|<option selected="" value="ex/);
 });
 
@@ -76,4 +76,9 @@ test('overflowing native centers visibly refuse graph and retain signed values/o
  const single={...slice,returned_shape:[1,2],axes:[{name:'E',values:[1e308],units:'eV'},{name:'z',values:[0,9],units:'nm'}],values:[[0,null]],invalid_mask:[[null,'positive_infinity']]};
  const singleton=renderToStaticMarkup(createElement(ui.SavedPlot,{slice:single}));
  finiteSvgGeometry(singleton);assert.match(singleton,/Graph unavailable/);assert.match(singleton,/1e\+308/);assert.match(singleton,/native positive_infinity/);assert.match(singleton,/0 m\^-3\/eV/);
+});
+
+test('negative native zero is explicit in unchanged value table',()=>{
+ const slice={view_id:'density',returned_shape:[1],logical_axes:['z'],axes:[{name:'z',values:[0],units:'nm'}],values:[-0],invalid_mask:[null],units:'m^-3',conventions:{},recorded_statuses:{}};
+ const html=renderToStaticMarkup(createElement(ui.SavedPlot,{slice}));assert.match(html,/-0 m\^-3/);
 });

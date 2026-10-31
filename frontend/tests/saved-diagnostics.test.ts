@@ -1,26 +1,9 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {readDiagnostics,readHistory,historyPaths,historySelection,exactText} from '../src/saved-diagnostics-data.ts';
-const hash='a'.repeat(64),selection={run_uuid:'run',execution_id:'ex',attempt:2,calcjob_uuid:'job'},source={provider:'aiida_retrieved' as const,source_uuid:null,source_sha256:null};
-const context={selection,source,point_id:'p',source_commit_sha256:hash,metadata_sha256:hash,source_attempt:1,plan_fingerprint:hash};
-const identity={point_id:'p',execution_id:'ex',attempt:1,plan_fingerprint:hash};
-const common={provider_selection:selection,provider_source:source,point_id:'p',source_attempt:1,identity,source_commit_sha256:hash,metadata_sha256:hash,generation:7,closed:null,recorded_statuses:{terminal_status:'failed',scientific_accepted:null},integrity:{metadata_checked:true,owner_sha_verified:false,native_validation:'not_performed'},coverage:{scientific_acceptance:'not_assessed'},io_counters:{},limits:{}};
-const descriptor={...common,schema:'qcl-negf.saved-diagnostics.v1',history:{status:'available',reason:null,source_artifact:{artifact_id:'history.h5',role:'science.history',schema:'qcl-negf-scientific-history-v4',bytes:100,sha256:hash},phases:[{phase:'scba',total_rows:5,columns:[{name:'r_K',units:null,dtype:'float64'}],attempt_spans:[]}]},resources:{status:'available',reason:null,checkpoint:{checkpoint_payload_bytes:{kind:'integer',decimal:'9007199254740993'},checkpoint_payload_seconds:2,includes_commit_publication:false,jit_separately_measured:false,scope:'point_commit_checkpoint_payload'},performance_summary:{status:'unavailable',reason:'source_binding_missing'}}};
-test('exact descriptor binding, failed unknown acceptance and large resource tags stay raw',()=>{
- const data=readDiagnostics(descriptor,context);assert.equal(data.closed,null);assert.equal(exactText(data.resources.checkpoint?.checkpoint_payload_bytes),'9007199254740993');
- for(const bad of [{provider_selection:{...selection,attempt:1}},{source_commit_sha256:'b'.repeat(64)},{identity:{...identity,attempt:2}},{provider_source:{...source,source_uuid:'foreign'}}])assert.throws(()=>readDiagnostics({...descriptor,...bad},context));
-});
-test('native coordinates, masks and cycle breaks are independent literal oracles',()=>{
- const data=readDiagnostics(descriptor,context),requested=historySelection('0','5','1',['r_K']);
- const raw={...common,schema:'qcl-negf.saved-history-slice.v1',source_artifact:descriptor.history.source_artifact,phase:'scba',selection:requested,total_rows:5,coordinates:{sequence:[100,101,102,103,104],iteration:[1,2,3,1,2],outer_iteration:[1,1,1,2,2],source_attempt:[1,1,1,1,1]},columns:[{name:'r_K',units:null,values:[.1,.001,null,.2,.02],invalid_mask:[null,null,'nan',null,null]}],break_before:[true,false,true,true,false],integrity:{...common.integrity,owner_sha_verified:true}};
- const result=readHistory(raw,context,data,'scba',requested);
- assert.deepEqual(historyPaths(result,'r_K','sequence'),[[[100,.1],[101,.001]],[[103,.2],[104,.02]]]);
- assert.deepEqual(historyPaths(result,'r_K','iteration'),[[[1,.1],[2,.001]],[[1,.2],[2,.02]]]);
- assert.throws(()=>readHistory({...raw,columns:[{...raw.columns[0],invalid_mask:[null,null,null,null,null]}]},context,data,'scba',requested));
- const exact={...result,coordinates:{...result.coordinates,sequence:[{kind:'integer' as const,decimal:'9007199254740993'},101,102,103,104]}};
- assert.deepEqual(historyPaths(exact,'r_K','sequence'),[[[101,.001]],[[103,.2],[104,.02]]]);
-});
-test('no implicit history selection, no duplicate columns or oversized pages',()=>{
- for(const values of [['','5','1'],['0','513','1'],['0','5','0'],['1.0','5','1'],['0','5','1e0']])assert.throws(()=>historySelection(values[0],values[1],values[2],['r_K']));
- assert.throws(()=>historySelection('0','5','1',['r_K','r_K']));
-});
+import {nativeFixture} from './saved-results.test.ts';
+import {readDiagnostics,readHistory,historyPaths,historyRequest,exactText} from '../src/saved-diagnostics-data.ts';
+import type {HistorySlice} from '../src/saved-diagnostics-data.ts';
+export function historyFixture(){const {state,response,context}=nativeFixture();const cell={tagged:{kind:'ieee',type:'f64',bits:'8000000000000000'},value:-0,invalid_reason:null,units:'A/m^2',missing_reason:null};const row={row_key:{stage:{kind:'symbol',value:'scba'}},stream_ordinal:'1',sequence:{kind:'integer',type:'Int64',decimal:'1'},source_identity:state.identity,source_epoch:'epoch',cells:{J:cell},break_before:true};const view={source:state,records:[{}],rows:[row],witness_updates:[],cursor:{last_record:'1'},at_cutoff:false,io_counters:{}};return {state,response,context,view,row,cell};}
+test('canonical history preserves raw IEEE signedzero and no fabricated units',()=>{const {state,response,context,view}=historyFixture();const request=historyRequest('scba',['J'],'1',null);const value=readHistory({...response,operation:'history',view},{...context,state_ref:state},request).view;assert.ok(Object.is(value.rows[0].cells.J.value,-0));assert.equal(exactText(value.rows[0].cells.J.value),'-0');assert.equal(value.rows[0].cells.J.tagged.bits,'8000000000000000');assert.deepEqual(value.cursor,{last_record:'1'});assert.equal(value.rows[0].cells.J.units,'A/m^2');assert.throws(()=>readHistory({...response,operation:'history',view:{...view,source:{...state,state_id:'foreign'}}},context,request));});
+test('unsafe exact coordinates, missing and owning breaks stay disconnected',()=>{const {view,row,cell}=historyFixture();view.rows=[row,{...row,sequence:{...row.sequence,decimal:'9007199254740993'},break_before:false},{...row,sequence:{...row.sequence,decimal:'3'},cells:{J:{...cell,value:2,missing_reason:'not_measured'}},break_before:false}] as typeof view.rows;const paths=historyPaths(view as unknown as HistorySlice,'J');assert.equal(paths.length,1);assert.equal(paths[0].length,1);assert.equal(exactText({kind:'integer',decimal:'9007199254740993'}),'9007199254740993');});
+test('descriptor keeps five assessment axes and not_loaded units; requests have finite consumed event cap',()=>{const {response,context,state}=nativeFixture();const view={source:state,fields:{scba:{J:'Float64'},outer:{}},status:{process:{state:'failed'},convergence:{state:'not_measured'},physics:{state:'not_measured'},discretization:{state:'not_measured'},experimental:{state:'not_measured'}},history:{records:'7'},closed:false,resources:{}};assert.deepEqual(readDiagnostics({...response,operation:'diagnostics',view},context).view.status,view.status);for(const bad of ['0','257','1.2','01'])assert.throws(()=>historyRequest('scba',['J'],bad,null));});

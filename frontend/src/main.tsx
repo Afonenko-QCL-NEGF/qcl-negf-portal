@@ -20,7 +20,6 @@ import {
   configuredRequest,
   ordinarySubmission,
   type Artifact,
-  type AgentReport,
   type AgentReportReceipt,
   type Config,
   type ExportStatus,
@@ -40,6 +39,8 @@ import { ClusterStatus } from "./cluster-status";
 import { Configurator } from "./configurator";
 import { SubmissionGate, mutationUncertain, verifyPlan } from "./configurator-data.ts";
 import type { PlanSelection } from "./configurator-data.ts";
+import { AgentReportUpload } from "./agent-report-upload.tsx";
+import { friendlyReport, getRawReport, ReportGate } from "./agent-report-data.ts";
 import "./style.css";
 
 function State({ run }: { run: Run }) {
@@ -129,12 +130,12 @@ function ExportPanel({ token, uuid, executionId, attempt, calcjob_uuid }: {
   </div>;
 }
 
-function AgentReportsPanel({ token, uuid }: { token: string; uuid: string }) {
+function AgentReportsPanel({ token, uuid, gate }: { token: string; uuid: string; gate: ReportGate }) {
   const [receipts, setReceipts] = useState<AgentReportReceipt[]>([]);
   const [offset, setOffset] = useState(0);
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState("");
-  const [file, setFile] = useState<AgentReport | null>(null);
+  const [file, setFile] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [reading, setReading] = useState(false);
   const [error, setError] = useState("");
@@ -164,7 +165,7 @@ function AgentReportsPanel({ token, uuid }: { token: string; uuid: string }) {
     setReading(Boolean(identifier));
     if (!identifier) return;
     try {
-      const value = await api<AgentReport>(token, `/runs/${uuid}/agent-reports/${identifier}`);
+      const value = await getRawReport(token, uuid, identifier);
       if (sequence === selectionSequence.current) setFile(value);
     } catch (err) {
       if (sequence === selectionSequence.current) setError(errorMessage(err));
@@ -174,10 +175,12 @@ function AgentReportsPanel({ token, uuid }: { token: string; uuid: string }) {
   }
 
   const receipt = receipts.find((value) => value.uuid === selected);
+  const friendly = file === null ? null : friendlyReport(file);
   return <section aria-label="Agent reports for this run">
     <h4>Agent reports for this run</h4>
     <p className="muted">These files contain author conclusions. Scientific result statuses and process logs remain separate.</p>
     <p className="muted">This run view does not establish a stable research card or canonical question relation.</p>
+    <AgentReportUpload token={token} uuid={uuid} gate={gate} refresh={() => setRevision(value => value + 1)} />
     <div className="export-actions">
       <select aria-label="Agent report file" value={selected} disabled={loading || !receipts.length}
         onChange={(event) => void selectReport(event.target.value)}>
@@ -194,35 +197,20 @@ function AgentReportsPanel({ token, uuid }: { token: string; uuid: string }) {
     {!loading && !receipts.length && <p className="empty small">No report files on this page.</p>}
     {reading && <p role="status" className="muted">Reading report file…</p>}
     {error && <p role="alert">{error}</p>}
-    {file && receipt && <>
-      <dl>
-        <dt>File</dt><dd><code>{receipt.filename}</code></dd>
-        <dt>Report UUID</dt><dd><code>{receipt.uuid}</code></dd>
+    {file !== null && receipt && <>
+      <dl><dt>Report UUID</dt><dd><code>{receipt.uuid}</code></dd>
         <dt>Size</dt><dd>{readableBytes(receipt.bytes)}</dd>
-        <dt>SHA-256</dt><dd><code>{receipt.sha256}</code></dd>
-        <dt>Anchored run</dt><dd><code>{file.anchor.run_uuid}</code></dd>
-        <dt>Frozen definition</dt><dd>{file.anchor.root_definition_id} ({file.anchor.root_kind})</dd>
-        <dt>Plan fingerprint</dt><dd><code>{file.anchor.plan_fingerprint}</code></dd>
-      </dl>
-      <h5>Author question snapshot</h5>
-      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{file.question_snapshot}</div>
-      <h5>Used run and attempt references</h5>
-      {file.used_runs.length ? <ol>{file.used_runs.map((reference, index) => <li key={index}>
-        <dl>
-          <dt>Run</dt><dd><code>{reference.run_uuid}</code></dd>
-          <dt>Plan fingerprint</dt><dd><code>{reference.plan_fingerprint}</code></dd>
-          <dt>Execution</dt><dd>{reference.execution_id}</dd>
-          <dt>Definition / variant</dt><dd>{reference.definition_id} / {reference.variant_id}</dd>
-          <dt>Attempt</dt><dd>{reference.attempt}</dd>
-          <dt>CalcJob UUID</dt><dd><code>{reference.calcjob_uuid}</code></dd>
-        </dl>
-      </li>)}</ol> : <p className="empty small">No used run or attempt references were supplied by the author.</p>}
-      <h5>Conclusion</h5>
-      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{file.conclusion}</div>
-      <h5>Reasoning</h5>
-      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{file.reasoning}</div>
-      <h5>Limitations</h5>
-      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{file.limitations}</div>
+        <dt>SHA-256</dt><dd><code>{receipt.sha256}</code></dd></dl>
+      {friendly && <>
+        <p>Anchored run: <code>{friendly.anchor.run_uuid}</code> · {friendly.anchor.root_definition_id} ({friendly.anchor.root_kind}) · <code>{friendly.anchor.plan_fingerprint}</code></p>
+        <h5>Author question snapshot</h5><p>{friendly.question_snapshot}</p>
+        <h5>Used run and attempt references</h5><ol>{friendly.used_runs.map((r,i)=><li key={i}>
+          <code>{r.run_uuid}</code> · {r.execution_id} · {r.definition_id} / {r.variant_id} · attempt {r.attempt} · <code>{r.calcjob_uuid}</code> · <code>{r.plan_fingerprint}</code>
+        </li>)}</ol>
+        <h5>Conclusion</h5><p>{friendly.conclusion}</p><h5>Reasoning</h5><p>{friendly.reasoning}</p>
+        <h5>Limitations</h5><p>{friendly.limitations}</p>
+      </>}
+      <h5>Exact author report</h5><pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{file}</pre>
     </>}
   </section>;
 }
@@ -245,6 +233,7 @@ function App() {
   const [plan, setPlan] = useState<string | null>(null);
   const [planName, setPlanName] = useState("");
   const submissionGate = useRef(new SubmissionGate());
+  const reportGate = useRef(new ReportGate());
   const planIdentity = useRef<PlanSelection | null>(null);
   const planOrigin = useRef<'raw' | 'configurator' | null>(null);
   const uploadGeneration = useRef(0);
@@ -835,7 +824,7 @@ function App() {
                       </details>
                     )}
                     <RunModelHelp token={token} run={detail} />
-                    <AgentReportsPanel key={detail.uuid} token={token} uuid={detail.uuid} />
+                    <AgentReportsPanel key={detail.uuid} token={token} uuid={detail.uuid} gate={reportGate.current} />
                     <h4>Process report</h4>
                     {report.length ? (
                       <ol className="report">

@@ -102,6 +102,23 @@ qcl-negf-results export ./retrieved-run/result ./exports --profile science
 
 The output directory for `verdi node repo dump` must not exist. Choose a different directory for each execution. `qcl-negf-results export` creates one checksummed archive without changing native scientific values. Its default status is `running`; supply `--status completed` only when that status is established by the scientific result. The `full-state` profile also retains full physics and recovery state. Copy the archive and its receipt using your normal file-transfer tool and verify them with `qcl-negf-receive` on the receiving machine. Export success establishes archive integrity, not numerical convergence or scientific acceptance.
 
+## Native5 retained point reader
+
+The light saved transport panel now reads an explicit native5 retained point
+through the original AiiDA binding UUID and full selected StateRef. Manifest,
+native slice and canonical history use the existing isolated child and owning
+public Results readers. Native views are dictionaries; native decimal-string
+identity/cursors and original IEEE/missing/status evidence stay separate from
+AiiDA input attempts and current access observations. See
+[saved-results.md](docs/saved-results.md) for exact selectors and lifetime rules.
+Old scientific v4 request shapes are refused. Execution-wide brief/current/
+retrieved/performance producer gates and installed/browser/scientific acceptance
+remain separate; this increment does not establish their readiness.
+
+Retained native5 integrity preserves distinct original binding metadata and current
+getter readback limitations; the current request RO observation is separate.
+Historical verification does not imply reverified native contexts or scientific acceptance.
+
 ## HTTP API
 
 The cluster panel has a [Russian user guide](docs/cluster-status.md) covering freshness,

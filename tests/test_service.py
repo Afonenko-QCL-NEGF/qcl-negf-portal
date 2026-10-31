@@ -34,8 +34,12 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         assert args == ("run", "execution")
         assert kwargs == {"attempt": 2, "calcjob_uuid": "exact-child"}
         record("selection")
-        return {"execution_id": "execution", "attempt": 2,
-                "calcjob_uuid": "exact-child", "status": "failed"}
+        return {
+            "execution_id": "execution",
+            "attempt": 2,
+            "calcjob_uuid": "exact-child",
+            "status": "failed",
+        }
 
     def inventory(*args, **kwargs):
         assert args == ("run", "execution")
@@ -110,20 +114,29 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
         with ThreadPoolExecutor(max_workers=4) as clients:
             futures = [clients.submit(actor.list_runs, limit=10) for _ in range(8)]
             assert all(future.result() == [] for future in futures)
-        assert actor.get_export_selection(
-            "run", "execution", attempt=2, calcjob_uuid="exact-child"
-        )["status"] == "failed"
-        assert actor.list_execution_artifacts(
-            "run", "execution", attempt=2, calcjob_uuid="exact-child"
-        ) == []
-        assert actor.get_export_plan(
-            "run", "execution", attempt=2, calcjob_uuid="exact-child"
-        )["plan"] == b"frozen bytes"
+        assert (
+            actor.get_export_selection("run", "execution", attempt=2, calcjob_uuid="exact-child")[
+                "status"
+            ]
+            == "failed"
+        )
+        assert (
+            actor.list_execution_artifacts(
+                "run", "execution", attempt=2, calcjob_uuid="exact-child"
+            )
+            == []
+        )
+        assert (
+            actor.get_export_plan("run", "execution", attempt=2, calcjob_uuid="exact-child")["plan"]
+            == b"frozen bytes"
+        )
         assert actor.get_artifact_metadata(
             "run", "execution", "result", attempt=2, calcjob_uuid="exact-child"
         ) == {"size": 4}
         assert actor.save_agent_report("run", b"exact agent report") == {
-            "uuid": "report", "filename": "agent-report.json", "bytes": 18,
+            "uuid": "report",
+            "filename": "agent-report.json",
+            "bytes": 18,
         }
         assert actor.list_agent_reports("run", limit=7, offset=3) == [{"uuid": "report"}]
         assert actor.read_agent_report("run", "report") == b"exact agent report"
@@ -161,3 +174,37 @@ def test_aiida_profile_operations_and_artifact_handles_have_one_thread_owner(mon
     assert events[0][1] != threading.get_ident()
     assert all(event[2] is events[0][2] for event in events)
     assert events[0][2].is_closed()
+
+
+def test_native_retained_read_is_dispatched_only_on_actor_owner(monkeypatch):
+    import aiida
+
+    events = []
+    import aiida.manage
+
+    monkeypatch.setattr(
+        aiida.manage, "get_manager", lambda: SimpleNamespace(unload_profile=lambda: None)
+    )
+    monkeypatch.setattr(aiida, "load_profile", lambda profile: None)
+    from pathlib import Path
+
+    import aiida_qcl_negf.service as owner
+
+    assert (
+        Path(owner.__file__).resolve()
+        == Path(__file__).resolve().parents[2] / "p07-b-credit-aiida/src/aiida_qcl_negf/service.py"
+    )
+
+    def read(*args, **kwargs):
+        events.append(threading.get_ident())
+        return {"status": "available", "detached": True}
+
+    monkeypatch.setattr(owner, "get_native_result_source", read)
+    service = AiidaService("synthetic")
+    try:
+        assert service.get_native_result_source(
+            "run", "exec", attempt=2, calcjob_uuid="job", point_id="point"
+        ) == {"status": "available", "detached": True}
+        assert len(events) == 1 and events[0] != threading.get_ident()
+    finally:
+        service.close()

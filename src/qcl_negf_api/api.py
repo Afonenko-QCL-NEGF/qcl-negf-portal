@@ -900,54 +900,88 @@ def create_app(settings: Settings | None = None, service: Any = None,
     @app.get("/api/v1/runs/{run_uuid}/saved-results/manifest", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/diagnostics", dependencies=protected)
     async def saved_metadata(
-        request: Request, run_uuid: UUID, execution_id: str | None = None,
-        attempt: int | None = Query(None, ge=1), calcjob_uuid: UUID | None = None,
-        cursor: str | None = None, point_id: str | None = None,
-        source_commit_sha256: str | None = None, metadata_sha256: str | None = None,
-        provider: str | None = None, source_uuid: str | None = None,
-        source_sha256: str | None = None,
+        request: Request,
+        run_uuid: UUID,
+        execution_id: str | None = None,
+        attempt: int | None = Query(None, ge=1),
+        calcjob_uuid: UUID | None = None,
+        point_id: str | None = None,
+        provider: str | None = None,
+        native_binding_uuid: str | None = None,
+        state_manifest_sha256: str | None = None,
     ):
-        operation = request.url.path.rsplit("/", 1)[1]
-        query_keys = {"execution_id", "attempt", "calcjob_uuid", "cursor", "point_id",
-                      "source_commit_sha256", "metadata_sha256", "provider",
-                      "source_uuid", "source_sha256"}
-        if operation == "sources":
-            query_keys = {"execution_id", "attempt", "calcjob_uuid"}
-        if (set(request.query_params) - query_keys or
-                len(request.query_params.multi_items()) != len(set(request.query_params))):
-            return JSONResponse({"detail": {"code": "selection_required",
-                "reason": "Only exact saved provenance selectors are supported"}},422,
-                headers={"Cache-Control": "no-store"})
-        query = {k: v for k, v in {"cursor": cursor, "point_id": point_id,
-            "source_commit_sha256": source_commit_sha256,
-            "metadata_sha256": metadata_sha256, "provider": provider,
-            "source_uuid": source_uuid, "source_sha256": source_sha256}.items()
-            if v is not None}
-        return await saved_call(request, run_uuid, operation, {"execution_id": execution_id,
-            "attempt": attempt, "calcjob_uuid": str(calcjob_uuid) if calcjob_uuid else None}, query)
+        allowed = {
+            "execution_id",
+            "attempt",
+            "calcjob_uuid",
+            "point_id",
+            "provider",
+            "native_binding_uuid",
+            "state_manifest_sha256",
+        }
+        if set(request.query_params) - allowed or len(request.query_params.multi_items()) != len(
+            set(request.query_params)
+        ):
+            raise HTTPException(422, "Only exact retained native selectors are supported")
+        query = {
+            k: v
+            for k, v in dict(
+                point_id=point_id,
+                provider=provider,
+                native_binding_uuid=native_binding_uuid,
+                state_manifest_sha256=state_manifest_sha256,
+            ).items()
+            if v is not None
+        }
+        return await saved_call(
+            request,
+            run_uuid,
+            request.url.path.rsplit("/", 1)[1],
+            dict(
+                execution_id=execution_id,
+                attempt=attempt,
+                calcjob_uuid=str(calcjob_uuid) if calcjob_uuid else None,
+            ),
+            query,
+        )
 
     @app.post("/api/v1/runs/{run_uuid}/saved-results/slice", dependencies=protected)
     @app.post("/api/v1/runs/{run_uuid}/saved-results/history", dependencies=protected)
     async def saved_slice(request: Request, run_uuid: UUID):
         try:
             from .saved_results import _json
+
             payload = _json(await request.body())
-            allowed = {"execution_id", "attempt", "calcjob_uuid", "point_id",
-                       "source_commit_sha256", "metadata_sha256", "view_id", "selection"}
             operation = request.url.path.rsplit("/", 1)[1]
-            if operation == "history":
-                allowed = (allowed - {"view_id"}) | {"phase"}
-            from .saved_nfs import provider as saved_provider
-            if not isinstance(payload, dict):
-                raise SavedResultError("selection_required")
-            source, rest = saved_provider(payload)
-            if set(rest) != allowed:
+            allowed = {
+                "execution_id",
+                "attempt",
+                "calcjob_uuid",
+                "point_id",
+                "provider",
+                "native_binding_uuid",
+                "state_manifest_sha256",
+                "source_state",
+            }
+            allowed |= (
+                {"view_id", "selection"}
+                if operation == "slice"
+                else {"stage", "fields", "maximum_records", "cursor"}
+            )
+            if not isinstance(payload, dict) or set(payload) != allowed or request.query_params:
                 raise SavedResultError("selection_required")
             selection = {k: payload.pop(k) for k in ("execution_id", "attempt", "calcjob_uuid")}
         except SavedResultError:
-            return JSONResponse({"detail": {"code": "selection_required",
-                "reason": "Use only exact provenance and semantic native selection"}},422,
-                headers={"Cache-Control": "no-store"})
+            return JSONResponse(
+                {
+                    "detail": {
+                        "code": "selection_required",
+                        "reason": "Use exact native provenance and explicit selection",
+                    }
+                },
+                422,
+                headers={"Cache-Control": "no-store"},
+            )
         return await saved_call(request, run_uuid, operation, selection, payload)
 
     @app.post("/api/v1/runs/{run_uuid}/live-results/{operation}", dependencies=protected)

@@ -137,3 +137,33 @@ test('metadata scalar spelling rejects newline aliases and malformed relative re
  for(const pin of [{...f.pin,node_uuid:f.pin.node_uuid+'\n'},{...f.pin,sha256:f.pin.sha256+'\n'},{...f.pin,bytes:'2\n'}])assert.throws(()=>data.readPointSource({...f.metadata,retained:{...f.metadata.retained,native_binding:pin}},f.selection,'point'));
  for(const path of ['../private','a//state.json','a/./state.json','a\\state.json',''])assert.throws(()=>data.readPointSource({...f.metadata,source_state:{...f.state,manifest:{...f.state.manifest,path}}},f.selection,'point'));
 });
+
+export function historyFixture(){
+ const {page,f}=catalogFixture();const row=page.points[0];
+ const selected={...f.selection,point_id:row.point_id,provider:'native_nfs',retained:Object.fromEntries(['native_result','native_binding','input_plan','source_graph'].map(k=>[k,f.pin])),source_state:f.state,source_invocation:{source_epoch:'epoch'},reduction:{stage:'scba',field:'J',first_record:'2',last_record:'6'}};
+ const counter={bytes_read_total:10,sha_bytes:0,hdf_bytes:0,metadata_bytes:10,logical_selected_bytes:0,maximum_io_bytes:44739242};
+ const credits={source_io_total:134217728,epochs_per_source:3,source_count:1,stage_share:44739242,reserved_bytes:134217726,actual_delivered_bytes:30,epochs:['construction','import','derive_and_close'].map(phase=>({source:0,phase,counters:counter})),metadata_readback_reserved:{owners:1,metadata_bytes:335544320,logical_io_bytes:268435456},metadata_readback_actual:null,metadata_readback_actual_reason:'not_returned_by_public_owner_API',copy_workspace:{raw_result_upper_bound:20000000,copies_and_encoding:3,reserved_bytes:60065536,maximum_bytes:134217728,nonrefundable:true,basis:'two_catalog_locators_plus_record_unit_and_exact_source_wrappers'},scope:'logical_source_metadata_copy_credit_not_RSS'};
+ const cutoff={head:{path:'catalog.json',bytes:'20',sha256:'a'.repeat(64),schema:'qcl-negf.scientific-catalog.v1',media_type:'application/json'},entries:'1',records:'6',scba_rows:'5',outer_rows:'0',witness_updates:'1',last_record:'6'};
+ const locator={source_identity:f.state.identity,source_epoch:'epoch',append_ordinal:'4',leaf:{path:'rows.h5',bytes:'100',sha256:'e'.repeat(64),schema:'qcl-negf-scientific-history-v5',media_type:'application/x-hdf5'},row_offset:'3'};
+ const result={source:f.state,request:selected.reduction,units:'A/m^2',observations:'4',updates:'1',finite_count:'2',nonfinite_count:'2',missing_count:'0',minimum:{value:{kind:'ieee',type:'f64',bits:'c010000000000000'},locator:{...locator,append_ordinal:'2',row_offset:'1'}},maximum:{value:{kind:'ieee',type:'f64',bits:'8000000000000000'},locator},coverage:{first_record:'2',last_record:'6',witness_updates:'counted_separately_no_scalar_replacement'},io_counters:counter,derived_by:'qcl_negf_results.live_views.derive_history.v1'};
+ const response={...f.response,operation:'derive-history',retained:{...f.response.retained,creator:row.creator},view:{result,source_invocation:selected.source_invocation,history_cutoff:cutoff,source_status:{process:{state:'failed',exit_code:1,reason:'NEW fixture'},...Object.fromEntries(['convergence','physics','discretization','experimental'].map(k=>[k,{state:'not_measured',reason:'No science evidence',evidence:null}]))},source_closed:true,input_plan:f.pin,source_graph:f.pin,credits,scientific_acceptance:'not_assessed'}};
+ return {selected,response,result,page,credits};
+}
+test('P10 history response preserves exact signed IEEE, strings, units and full source receipts',async()=>{
+ const d=await import('../src/saved-results-data.ts');const {selected,response}=historyFixture();
+ const read=d.readHistoryDerive(response,selected as never);assert.equal(read.view.result.maximum.value.bits,'8000000000000000');
+ for(const mutate of [(r:any)=>r.view.result.source.identity.attempt='1',(r:any)=>r.view.result.maximum.locator.source_epoch='foreign',(r:any)=>r.view.result.observations=4,(r:any)=>r.view.source_invocation.source_epoch='foreign',(r:any)=>r.view.input_plan.sha256='0'.repeat(64),(r:any)=>r.view.result.request.last_record='7',(r:any)=>r.view.credits.epochs.pop(),(r:any)=>r.retained.creator=null,(r:any)=>r.view.source_status.process.exit_code=9007199254740992]){const r=structuredClone(response);mutate(r);assert.throws(()=>d.readHistoryDerive(r,selected as never));}
+});
+test('P10 explicit history selection requires all four genuine pins and u64 range',async()=>{
+ const d=await import('../src/saved-results-data.ts');const {page}=historyFixture();
+ const selected=d.historySelection(page,page.points[0],{stage:'scba',field:'J',first_record:'1',last_record:'18446744073709551615'});
+ assert.equal(selected.reduction.last_record,'18446744073709551615');assert.equal(selected.source_invocation.source_epoch,'epoch');
+ assert.throws(()=>d.historySelection(page,page.points[0],{stage:'scba',field:'J',first_record:'0',last_record:'2'}));
+});
+
+test('P10 action session synchronously excludes a duplicate and fences late result/error on every edit',async()=>{
+ const d=await import('../src/saved-results-data.ts');const session=new d.HistorySession();let shown='unchanged';
+ const first=session.beginAction();assert.notEqual(first,null);assert.equal(session.beginAction(),null);
+ let resolve!:(v:string)=>void;const pending=session.receiveAction(first!,()=>new Promise<string>(r=>resolve=r),v=>shown=String(v),()=>shown='late error');session.invalidate();resolve('late success');await pending;assert.equal(shown,'unchanged');
+ let reject!:(e:Error)=>void;const second=session.beginAction()!;const failure=session.receiveAction(second,()=>new Promise<string>((_,r)=>reject=r),v=>shown=String(v),()=>shown='late error');session.invalidate();reject(new Error('late'));await failure;assert.equal(shown,'unchanged');assert.notEqual(session.beginAction(),null);
+});

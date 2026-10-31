@@ -1022,6 +1022,47 @@ def create_app(settings: Settings | None = None, service: Any = None,
             query,
         )
 
+    @app.post("/api/v1/runs/{run_uuid}/saved-results/derive-history", dependencies=protected)
+    @app.post("/api/v1/runs/{run_uuid}/saved-results/compare-history", dependencies=protected)
+    async def saved_history_action(request: Request, run_uuid: str):
+        from .saved_nfs import history_query, uuid
+        from .saved_results import _json
+
+        try:
+            uuid(run_uuid)
+            if request.query_params:
+                raise SavedResultError("selection_required")
+            raw = bytearray()
+            async for chunk in request.stream():
+                if len(raw) + len(chunk) > 65536:
+                    raise SavedResultError("budget_exceeded")
+                raw.extend(chunk)
+            payload = _json(raw)
+            operation = request.url.path.rsplit("/", 1)[1]
+            if type(payload) is not dict:
+                raise SavedResultError("selection_required")
+            if operation == "derive-history":
+                selection = {k: payload[k] for k in ("execution_id", "attempt", "calcjob_uuid")}
+                query = {k: v for k, v in payload.items() if k not in selection}
+            else:
+                selection = {
+                    k: payload["left"][k] for k in ("execution_id", "attempt", "calcjob_uuid")
+                }
+                query = payload
+            history_query(operation, {"run_uuid": run_uuid, **selection}, query)
+        except SavedResultError, ValueError, TypeError, KeyError, UnicodeError:
+            return JSONResponse(
+                {
+                    "detail": {
+                        "code": "selection_required",
+                        "reason": "Exact retained sources and explicit reduction required",
+                    }
+                },
+                status_code=422,
+                headers={"Cache-Control": "no-store"},
+            )
+        return await saved_call(request, run_uuid, operation, selection, query)
+
     @app.post("/api/v1/runs/{run_uuid}/saved-results/slice", dependencies=protected)
     @app.post("/api/v1/runs/{run_uuid}/saved-results/history", dependencies=protected)
     async def saved_slice(request: Request, run_uuid: UUID):

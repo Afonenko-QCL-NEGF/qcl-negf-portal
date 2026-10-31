@@ -87,7 +87,7 @@ test('negative native zero is explicit in unchanged value table',()=>{
 test('ordinary researcher refresh has no mandatory opaque pins',()=>{
  const html=renderToStaticMarkup(createElement(ui.SavedResultsPanel,{token:'secret',run:{uuid:'run',children:[],plan_points:[]}}));
  assert.match(html,/Обновить сведения выбранной точки/);
- assert.doesNotMatch(html,/Original native binding UUID|Selected native manifest SHA|<input/);
+ assert.doesNotMatch(html,/Original native binding UUID|Selected native manifest SHA/);
 });
 test('C01 line axis labels preserve native signed zero',()=>{
  const slice={view_id:'density',returned_shape:[2],logical_axes:['z'],axes:[{name:'z',values:[-0,1],units:'nm'}],values:[-0,2],invalid_mask:[null,null],units:'m^-3',conventions:{},recorded_statuses:{}};
@@ -125,15 +125,16 @@ const apiURL='data:text/javascript;base64,'+Buffer.from("export const api=(...a)
 let wired=transpiled.outputText.replaceAll('"./saved-diagnostics.tsx"',JSON.stringify(diagnosticUrl)).replaceAll("'./saved-diagnostics.tsx'",JSON.stringify(diagnosticUrl));
 for(const [specifier,resolved] of [['react',hookURL],['react/jsx-runtime',import.meta.resolve('react/jsx-runtime')],['./api',apiURL],['./saved-results-data',new URL('../src/saved-results-data.ts',import.meta.url).href]])wired=wired.replaceAll(`"${specifier}"`,JSON.stringify(resolved)).replaceAll(`'${specifier}'`,JSON.stringify(resolved));
 const wiredUI=await import('data:text/javascript;base64,'+Buffer.from(wired).toString('base64'));
-function catalogHarness(){
+function catalogHarness(component='SavedCatalogPanel'){
  const globals=globalThis as unknown as {__r1Hooks:Record<string,Function>;__r1Api:Function};
  const slots:unknown[]=[],effects:(()=>void)[]=[];let cursor=0,tree:unknown;
- const requests:{path:string;resolve:(v:unknown)=>void;reject:(e:unknown)=>void}[]=[];
- globals.__r1Hooks={useState:(initial:unknown)=>{const i=cursor++;if(!(i in slots))slots[i]=initial;return [slots[i],(v:unknown)=>slots[i]=typeof v==='function'?v(slots[i]):v];},useRef:(value:unknown)=>{const i=cursor++;return slots[i]??(slots[i]={current:value});},useEffect:(f:()=>Function,deps:unknown[])=>{const i=cursor++,old=slots[i] as {deps:unknown[];cleanup?:Function}|undefined;if(!old||deps.some((v,j)=>!Object.is(v,old.deps[j])))effects.push(()=>{old?.cleanup?.();slots[i]={deps:[...deps],cleanup:f()};});}};
- globals.__r1Api=(_token:string,path:string)=>new Promise((resolve,reject)=>requests.push({path,resolve,reject}));
- function render(props:unknown){cursor=0;tree=wiredUI.SavedCatalogPanel(props);while(effects.length)effects.shift()!();cursor=0;tree=wiredUI.SavedCatalogPanel(props);return renderToStaticMarkup(tree as never);}
- function click(text:string){let found=false;function walk(v:unknown){if(Array.isArray(v)){v.forEach(walk);return;}if(!v||typeof v!=='object')return;const e=v as {type:unknown;props:{children?:unknown;onClick?:()=>void}};if(e.type==='button'&&e.props.children===text){found=true;e.props.onClick!();}else walk(e.props?.children);}walk(tree);assert.ok(found,text);}
- return {render,click,requests};
+ const requests:{path:string;resolve:(v:unknown)=>void;reject:(e:unknown)=>void;body?:unknown}[]=[];
+ globals.__r1Hooks={useState:(initial:unknown)=>{const i=cursor++;if(!(i in slots))slots[i]=typeof initial==='function'?initial():initial;return [slots[i],(v:unknown)=>slots[i]=typeof v==='function'?v(slots[i]):v];},useRef:(value:unknown)=>{const i=cursor++;return slots[i]??(slots[i]={current:value});},useEffect:(f:()=>Function,deps:unknown[])=>{const i=cursor++,old=slots[i] as {deps:unknown[];cleanup?:Function}|undefined;if(!old||deps.some((v,j)=>!Object.is(v,old.deps[j])))effects.push(()=>{old?.cleanup?.();slots[i]={deps:[...deps],cleanup:f()};});}};
+ globals.__r1Api=(_token:string,path:string,body?:unknown)=>new Promise((resolve,reject)=>requests.push({path,body,resolve,reject}));
+ function render(props:unknown){cursor=0;tree=wiredUI[component](props);while(effects.length)effects.shift()!();cursor=0;tree=wiredUI[component](props);return renderToStaticMarkup(tree as never);}
+ function click(text:string){let found=false;function walk(v:unknown){if(Array.isArray(v)){v.forEach(walk);return;}if(!v||typeof v!=='object')return;const e=v as {type:unknown;props:{children?:unknown;onClick?:()=>void}};if(e.type==='button'&&(Array.isArray(e.props.children)?e.props.children.join(''):e.props.children)===text){found=true;e.props.onClick!();}else walk(e.props?.children);}walk(tree);assert.ok(found,text);}
+ function find(predicate:(e:any)=>boolean):any{let found:any;function walk(v:any){if(Array.isArray(v))v.forEach(walk);else if(v&&typeof v==='object'){if(predicate(v))found=v;else walk(v.props?.children);}}walk(tree);assert.ok(found,'element exists');return found.props;}
+ return {render,click,requests,find};
 }
 const settle=()=>new Promise<void>(resolve=>setImmediate(resolve));
 test('R1 actual manual catalog/brief handlers do not read on mount/poll and render exact declared text',async()=>{
@@ -175,4 +176,64 @@ test('R1 actual next/previous page handlers reject late brief success and error 
   if(failure)late.reject(new Error('obsolete page error'));else late.resolve({...brief,pagination:backward?second.pagination:page.pagination});
   await settle();const html=h.render(props);assert.doesNotMatch(html,/obsolete page error|<circle|<polyline/);if(!backward)assert.match(html,/point2/);
  }
+});
+
+test('P10 explicit pair UI includes independent right run picker and unknown author assessment',()=>{
+ const {page}=catalogFixture();const html=renderToStaticMarkup(createElement(ui.SavedHistoryPanel,{token:'never-render-token',run:{uuid:page.provider_selection.run_uuid},page}));
+ for(const literal of ['Run UUID','Получить исполнения правого run','Закрепить слева','first_record','last_record','автора','unknown','Сравнить две закреплённые истории','batch overshoot'])assert.ok(html.includes(literal),literal);
+ assert.doesNotMatch(html,/never-render-token|Bearer|dark/);
+});
+test('P10 raw signed bits counts null and locators render without computing differences',async()=>{
+ const {historyFixture}=await import('./saved-results.test.ts');const {result}=historyFixture();const html=renderToStaticMarkup(createElement(ui.HistoryResultView,{result}));
+ for(const literal of ['8000000000000000','c010000000000000','observations 4','updates 1','A/m^2','source_epoch','append_ordinal'])assert.ok(html.includes(literal),literal);
+ const absent={...result,minimum:null,maximum:null,units:null};const nulls=renderToStaticMarkup(createElement(ui.HistoryResultView,{result:absent}));assert.match(nulls,/units: null/);assert.match(nulls,/конечное значение отсутствует/);
+});
+
+async function readyHistoryHarness(){
+ const {historyFixture}=await import('./saved-results.test.ts');const fixture=historyFixture();
+ const h=catalogHarness('SavedHistoryPanel'),props={token:'token',run:{uuid:fixture.page.provider_selection.run_uuid},page:fixture.page};
+ h.render(props);assert.equal(h.requests.length,0);
+ h.find(e=>e.type?.name==='HistoryRows').choose({page:fixture.page,row:fixture.page.points[0]});h.render(props);
+ h.find(e=>e.type?.name==='ReductionFields'&&e.props.side==='left').edit(fixture.selected.reduction);h.render(props);
+ return {h,props,fixture};
+}
+test('P10 actual explicit derive handler sends full immutable selection once and renders owning response',async()=>{
+ const {h,props,fixture}=await readyHistoryHarness();
+ h.click('Вычислить редукцию левой истории');h.click('Вычислить редукцию левой истории');assert.equal(h.requests.length,1);
+ const request=h.requests.shift()!;assert.match(request.path,/derive-history$/);const {run_uuid,...expected}=fixture.selected;assert.deepEqual(request.body,expected);
+ request.resolve(fixture.response);await settle();const html=h.render(props);assert.match(html,/8000000000000000/);assert.match(html,/not_assessed/);
+});
+test('P10 actual source/range/token/run/page/removal edits fence deferred success and failure',async()=>{
+ for(const cause of ['left','right','field','range','assessment','token','run','page','removal'])for(const fail of [false,true]){
+  const {h,props,fixture}=await readyHistoryHarness();h.click('Вычислить редукцию левой истории');const old=h.requests.shift()!;const next=structuredClone(props);
+  if(cause==='left')h.find(e=>e.type?.name==='HistoryRows').choose({page:fixture.page,row:fixture.page.points[0]});
+  if(cause==='right')h.find(e=>e.type?.name==='RightHistoryPicker').choose({page:fixture.page,row:fixture.page.points[0]});
+  if(cause==='field'||cause==='range')h.find(e=>e.type?.name==='ReductionFields'&&e.props.side==='left').edit({...fixture.selected.reduction,...(cause==='field'?{field:'r_D'}:{last_record:'5'})});
+  if(cause==='assessment')h.find(e=>e.type==='select'&&e.props.value==='unknown').onChange({target:{value:'different'}});
+  if(cause==='token')next.token='new-token';if(cause==='run')next.run.uuid=fixture.page.provider_selection.calcjob_uuid;
+  if(cause==='page')next.page.pagination.page_ref+='other';
+  if(cause==='removal')h.click('Снять left');
+  h.render(next);if(fail)old.reject(new Error('obsolete-history-error'));else old.resolve(fixture.response);await settle();
+  const html=h.render(next);assert.doesNotMatch(html,/obsolete-history-error|observations 4/);
+ }
+});
+test('P10 actual pair handler includes a separately pinned right run and explicit unknown assessment',async()=>{
+ const {h,props,fixture}=await readyHistoryHarness();const rightPage=structuredClone(fixture.page);rightPage.provider_selection.run_uuid='77777777-7777-4777-8777-777777777777';
+ h.find(e=>e.type?.name==='RightHistoryPicker').choose({page:rightPage,row:rightPage.points[0]});h.render(props);
+ h.find(e=>e.type?.name==='ReductionFields'&&e.props.side==='right').edit(fixture.selected.reduction);h.render(props);
+ h.find(e=>e.type==='textarea'&&e.props.value==='').onChange({target:{value:'Explicit author reason'}});h.render(props);
+ h.click('Сравнить две закреплённые истории');assert.equal(h.requests.length,1);const request=h.requests.shift()!;assert.match(request.path,/compare-history$/);
+ const pair=request.body as any;assert.equal(pair.left.run_uuid,props.run.uuid);assert.equal(pair.right.run_uuid,rightPage.provider_selection.run_uuid);assert.equal(pair.comparability.model,'unknown');
+ request.reject(new Error('NEW controlled pair refusal'));await settle();assert.match(h.render(props),/NEW controlled pair refusal/);
+});
+
+test('P10 actual right-run picker reads only explicit run and one requested finite catalog page',async()=>{
+ const {page,f}=catalogFixture();let pinned:any=null;const h=catalogHarness('RightHistoryPicker'),props={token:'token',choose:(v:any)=>pinned=v,invalidate:()=>{}};
+ h.render(props);assert.equal(h.requests.length,0);
+ h.find(e=>e.type==='input').onChange({target:{value:f.selection.run_uuid}});h.render(props);
+ h.click('Получить исполнения правого run');assert.equal(h.requests.length,1);const runRequest=h.requests.shift()!;assert.equal(runRequest.path,`/runs/${f.selection.run_uuid}`);
+ runRequest.resolve({uuid:f.selection.run_uuid,children:[{uuid:f.selection.calcjob_uuid,execution_id:'exec',attempt:2}]});await settle();h.render(props);assert.equal(h.requests.length,0);
+ h.find(e=>e.type==='select').onChange({target:{value:f.selection.calcjob_uuid}});h.render(props);assert.equal(h.requests.length,0);
+ h.click('Прочитать правый каталог');assert.equal(h.requests.length,1);const request=h.requests.shift()!;assert.match(request.path,/saved-results\/sources\?.*limit=8/);request.resolve(page);await settle();h.render(props);assert.equal(h.requests.length,0);
+ h.find(e=>e.type?.name==='HistoryRows').choose({page,row:page.points[0]});assert.deepEqual(pinned.page.provider_selection,f.selection);assert.equal(h.requests.length,0);
 });

@@ -1,5 +1,6 @@
 """Synthetic mount facts + real filesystem/native5 public readers; no real NFS."""
 
+import os
 import threading
 import time
 from copy import deepcopy
@@ -10,10 +11,30 @@ from test_saved_results import BINDING as BINDING
 from test_saved_results import COMPUTER as COMPUTER
 from test_saved_results import catalog_case as catalog_case
 from test_saved_results import catalog_read, read
+from test_saved_results import history_case as history_case
 from test_saved_results import native_case as native_case
 
 from qcl_negf_api import saved_nfs, saved_results
 from qcl_negf_api.saved_results import SavedResultError
+
+
+def _qualified_source_roots(modules):
+    """Portable parent/child check; an owning run can inject frozen source roots."""
+    portal = Path(__file__).resolve().parents[1] / "src"
+    expected = {"qcl_negf_api": portal}
+    for package, variable in [
+        ("qcl_negf_results", "QCL_NEGF_TEST_RESULTS_SOURCE_ROOT"),
+        ("qcl_negf_contracts", "QCL_NEGF_TEST_CONTRACTS_SOURCE_ROOT"),
+    ]:
+        if variable in os.environ:
+            expected[package] = Path(os.environ[variable]).resolve()
+    for name, (filename, _) in modules.items():
+        package = name.split(".")[0]
+        if package in expected:
+            module_path = Path(*name.split("."))
+            leaf = "__init__.py" if "." not in name else module_path.name + ".py"
+            relative = module_path / leaf if "." not in name else module_path.parent / leaf
+            assert Path(filename) == expected[package] / relative
 
 
 @pytest.mark.parametrize(
@@ -95,9 +116,7 @@ def test_R1_actual_qualified_page_child_close_kill_and_reap(
         m = importlib.import_module(name)
         p = Path(m.__file__).resolve()
         modules[name] = (str(p), hashlib.sha256(p.read_bytes()).hexdigest())
-    assert "/p09-native-portal/" in modules["qcl_negf_api.saved_results"][0]
-    assert "/p30-s3-results/" in modules["qcl_negf_results.state"][0]
-    assert "/p30-performance-sideband-contracts/" in modules["qcl_negf_contracts.messages"][0]
+    _qualified_source_roots(modules)
     wrapper = tmp_path / "page-child.py"
     marker = tmp_path / "opened"
     code = (
@@ -131,8 +150,8 @@ def test_R1_actual_qualified_page_child_close_kill_and_reap(
     def spawn(args, **kwargs):
         assert args[1:3] == ["-m", "qcl_negf_api.saved_results"]
         assert all(
-            p in kwargs["env"]["PYTHONPATH"]
-            for p in ("p09-native-portal", "p30-s3-results", "p30-performance-sideband-contracts")
+            str(Path(path).parent.parent) in kwargs["env"]["PYTHONPATH"]
+            for path, _ in modules.values()
         )
         child = original([args[0], str(wrapper), args[-1]], **kwargs)
         children.append(child)
@@ -304,19 +323,7 @@ def test_real_isolated_worker_uses_selected_imports_and_closes_actual_child(
         )
         for module in (saved_results, selected_state, selected_contracts)
     }
-    selected = Path(__file__).resolve().parents[2]
-    assert (
-        Path(saved_results.__file__).resolve()
-        == selected / "p09-native-portal/src/qcl_negf_api/saved_results.py"
-    )
-    assert (
-        Path(selected_state.__file__).resolve()
-        == selected / "p30-s3-results/src/qcl_negf_results/state.py"
-    )
-    assert (
-        Path(selected_contracts.__file__).resolve()
-        == selected / "p30-performance-sideband-contracts/src/qcl_negf_contracts/__init__.py"
-    )
+    _qualified_source_roots(modules)
     assert (
         modules[selected_state.__name__][1]
         == "732ec8585dc5a16aa3b841d6f43f8cfe5d7417342dcd5a38cbfedea4654de596"
@@ -432,3 +439,174 @@ def test_metadata_pins_bind_next_reader_and_foreign_full_state_is_refused(native
     wrong["state_id"] = "stale"
     with pytest.raises(SavedResultError, match="identity_mismatch"):
         read(native_case, "slice", dict(source_state=wrong, view_id="density", selection=[0]))
+
+
+@pytest.mark.parametrize("mode", ["success", "failure_second", "cancel_first", "cancel_second"])
+def test_P10_actual_pair_child_sources_kill_reap(
+    history_case, tmp_path, monkeypatch, record_property, mode
+):
+    import asyncio
+    import hashlib
+    import importlib
+    import json
+
+    from test_saved_results import history_read, history_selection
+
+    c = history_case
+    left, right = history_selection(c), history_selection(c, 1)
+    assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "unknown")
+    assessment.update(evidence=[], reason="NEW source/L synthetic only")
+    pair = dict(left=left, right=right, comparability=assessment)
+    if mode == "failure_second":
+        (c.data / "p1" / "manifest.json").write_bytes(b"{}")
+    modules = {}
+    for name in (
+        "qcl_negf_api.saved_results",
+        "qcl_negf_api.saved_nfs",
+        "qcl_negf_results.state",
+        "qcl_negf_results.live_views",
+        "qcl_negf_results._capture_io",
+        "qcl_negf_contracts.messages",
+    ):
+        p = Path(importlib.import_module(name).__file__).resolve()
+        modules[name] = (str(p), hashlib.sha256(p.read_bytes()).hexdigest())
+    _qualified_source_roots(modules)
+    marker = tmp_path / "opened"
+    code = (
+        "import importlib,hashlib,signal\nfrom pathlib import Path\n"
+        "from qcl_negf_api import saved_nfs,saved_results\nexpected=" + repr(modules) + "\n"
+        "for name,(path,digest) in expected.items():\n"
+        " p=Path(importlib.import_module(name).__file__).resolve()\n"
+        " assert str(p)==path and hashlib.sha256(p.read_bytes()).hexdigest()==digest\n"
+        "saved_nfs.ROOT="
+        + repr(str(c.root))
+        + "\nsaved_nfs._mountinfo=lambda:"
+        + repr(c.mount)
+        + "\n"
+    )
+    if mode.startswith("cancel"):
+        target = "p0" if mode == "cancel_first" else "p1"
+        code += (
+            "from qcl_negf_results.state import StateReader\noriginal=StateReader.__init__\n"
+            "def held(self,*a,**k):\n original(self,*a,**k)\n"
+            " if self.root.name==" + repr(target) + ":\n"
+            "  Path(" + repr(str(marker)) + ').write_text("open")\n  signal.pause()\n'
+            "StateReader.__init__=held\n"
+        )
+    code += "raise SystemExit(saved_results._main())\n"
+    wrapper = tmp_path / "history-child.py"
+    wrapper.write_text(code)
+    original = saved_results.subprocess.Popen
+    children = []
+    starts = []
+
+    def spawn(args, **kwargs):
+        child = original([args[0], str(wrapper), args[-1]], **kwargs)
+        children.append(child)
+        starts.append(Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+        return child
+
+    monkeypatch.setattr(saved_results.subprocess, "Popen", spawn)
+    c.adapter.worker = saved_results._worker
+    if mode == "success":
+        result = history_read(c, "compare-history", pair)
+        assert result["view"]["left"]["observations"] == "4"
+        record_property("p10_actual_child_golden", json.dumps(result))
+    elif mode == "failure_second":
+        with pytest.raises(SavedResultError):
+            history_read(c, "compare-history", pair)
+    else:
+
+        async def scenario():
+            task = asyncio.create_task(c.adapter.read("compare-history", c.selection, pair))
+            for _ in range(600):
+                if marker.exists():
+                    break
+                await asyncio.sleep(0.005)
+            assert marker.exists()
+            with pytest.raises(SavedResultError, match="busy"):
+                await c.adapter.read("derive-history", c.selection, {})
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            for _ in range(200):
+                if c.adapter.active is None:
+                    break
+                await asyncio.sleep(0.005)
+            assert c.adapter.active is None and not c.adapter.busy
+
+        asyncio.run(scenario())
+    assert len(children) == 1
+    assert all(p.poll() is not None and p.stdout.closed and p.stderr.closed for p in children)
+    record_property(
+        "p10_child_source_receipt",
+        json.dumps(
+            dict(
+                mode=mode,
+                modules=modules,
+                children=[
+                    dict(
+                        pid=p.pid,
+                        start_ticks=s,
+                        returncode=p.returncode,
+                        reaped=p.poll() is not None,
+                    )
+                    for p, s in zip(children, starts, strict=True)
+                ],
+                qualification="SOURCE/L simulated RO facts, no installed/NFS/scientific acceptance",
+            )
+        ),
+    )
+
+
+@pytest.mark.parametrize("change", ["state", "locator_epoch", "count", "credit"])
+def test_P10_parent_rechecks_child_full_source_result_and_epoch_ledger(history_case, change):
+    from test_saved_results import history_read
+
+    c = history_case
+
+    def worker(op, request, spool, *args):
+        value = saved_results._read_request({"operation": op, **request}, spool)
+        if change == "state":
+            value["view"]["source"]["identity"]["model_sha256"] = "0" * 64
+        elif change == "locator_epoch":
+            value["view"]["maximum"]["locator"]["source_epoch"] = "foreign"
+        elif change == "count":
+            value["view"]["observations"] = 4
+        else:
+            value["credits"]["epochs"][2]["counters"]["bytes_read_total"] += 1
+        return value
+
+    c.adapter.worker = worker
+    with pytest.raises(SavedResultError):
+        history_read(c)
+
+
+def test_P10_both_public_readers_close_before_any_domain(history_case, monkeypatch):
+    from qcl_negf_results.state import StateReader
+    from test_saved_results import history_read, history_selection
+
+    c = history_case
+    closed = []
+    reader_close = StateReader.close
+    domain_close = saved_nfs._NativeDomain.close
+
+    def close_reader(self):
+        reader_close(self)
+        closed.append(("reader", self.root.name))
+
+    def close_domain(self):
+        assert [x[0] for x in closed[:2]] == ["reader", "reader"]
+        domain_close(self)
+        closed.append(("domain", self.root.name))
+
+    monkeypatch.setattr(StateReader, "close", close_reader)
+    monkeypatch.setattr(saved_nfs._NativeDomain, "close", close_domain)
+    assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "unknown")
+    assessment.update(evidence=[], reason="NEW lifetime control")
+    history_read(
+        c,
+        "compare-history",
+        dict(left=history_selection(c), right=history_selection(c, 1), comparability=assessment),
+    )
+    assert closed == [("reader", "p0"), ("reader", "p1"), ("domain", "p1"), ("domain", "p0")]

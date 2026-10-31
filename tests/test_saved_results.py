@@ -875,11 +875,15 @@ def test_metadata_refresh_uses_actual_actor_owner_thread_with_none_expectation(
 
     from qcl_negf_api.service import AiidaService
 
-    assert (
-        Path(owner.__file__).resolve()
-        == Path(__file__).resolve().parents[2]
-        / "p09-r1-catalog-aiida/src/aiida_qcl_negf/service.py"
-    )
+    import os
+
+    source_root = Path(os.environ.get(
+        "QCL_NEGF_TEST_AIIDA_SOURCE_ROOT",
+        Path(__file__).resolve().parents[2] / "qcl-negf-aiida" / "src",
+    )).resolve()
+    owner_file = Path(owner.__file__).resolve()
+    assert owner_file == source_root / "aiida_qcl_negf" / "service.py"
+    owner_source_sha256 = hashlib.sha256(owner_file.read_bytes()).hexdigest()
     events = []
     monkeypatch.setattr(
         aiida, "load_profile", lambda profile: events.append(("load", threading.get_ident()))
@@ -908,6 +912,7 @@ def test_metadata_refresh_uses_actual_actor_owner_thread_with_none_expectation(
         actor.close()
     assert [e[0] for e in events] == ["load", "getter", "unload"]
     assert len({e[1] for e in events}) == 1 and events[0][1] != threading.get_ident()
+    assert hashlib.sha256(owner_file.read_bytes()).hexdigest() == owner_source_sha256
 
 
 @pytest.mark.parametrize("kind", [LookupError, ValueError])
@@ -919,3 +924,380 @@ def test_metadata_owner_failure_never_becomes_available_absent(native_case, kind
     with pytest.raises(SavedResultError, match="unavailable_storage") as caught:
         metadata_read(native_case)
     assert "private" not in str(caught.value)
+
+
+@pytest.fixture
+def history_case(catalog_case, monkeypatch):
+    """NEW immutable history sources; signed values are an independent literal oracle."""
+    import result_v2_fixture as f
+
+    c = catalog_case(finals=0, gaps=False, declared_count=2)
+    points = []
+    for i, d in enumerate(c.catalog["declared_points"]):
+        monkeypatch.setitem(f.IDENTITY, "point_id", d["id"])
+        rows = [
+            f.record(1, 7, "4008000000000000"),
+            f.record(2, 9, "c010000000000000"),
+            f.record(3, 11, "7ff8000000001234"),
+            f.record(4, 13, "8000000000000000"),
+            f.record(5, 15, "7ff0000000000000"),
+        ]
+        update = deepcopy(rows[0])
+        update["stream_ordinal"] = "6"
+        update["core"]["fields"]["sequence"]["decimal"] = "17"
+        update["core"]["fields"]["action"] = f.symbol("witness_update")
+        update["target"] = dict(
+            scope="same_leaf",
+            source_identity=update["identity"],
+            source_epoch="epoch",
+            append_ordinal="1",
+            leaf=None,
+            row_offset="0",
+            anchor_state=None,
+            anchor_history=None,
+        )
+        rows.append(update)
+        state = f.source(c.data / d["id"], rows)
+        source = dict(
+            c.source,
+            kind="checkpoint",
+            artifact_root=d["id"],
+            selected_state=state,
+            observations=None,
+            diagnostics=None,
+            reason="interrupted",
+        )
+        points.append(
+            dict(
+                point_id=d["id"],
+                point_attempt=2**64 - 1,
+                plan_point_id=d["id"],
+                coordinates={
+                    k: d[k] for k in ("temperature_K", "voltage_per_period_V", "branch", "order")
+                },
+                source=source,
+                source_invocation={"source_epoch": "epoch"},
+                creator={"calcjob_uuid": JOB, "binding_uuid": None},
+            )
+        )
+    c.catalog["binding"]["points"] = points
+    _catalog_repin(c)
+    return c
+
+
+def history_selection(c, i=0, **reduction):
+    p = c.catalog["binding"]["points"][i]
+    b = c.catalog["binding"]
+    return dict(
+        **c.selection,
+        provider="native_nfs",
+        point_id=p["point_id"],
+        retained={
+            k: deepcopy(c.catalog[k] if k in c.catalog else b[k])
+            for k in ("native_result", "native_binding", "input_plan", "source_graph")
+        },
+        source_state=deepcopy(p["source"]["selected_state"]),
+        source_invocation=deepcopy(p["source_invocation"]),
+        reduction=dict(stage="scba", field="J", first_record="2", last_record="6", **reduction),
+    )
+
+
+def history_read(c, operation="derive-history", payload=None):
+    selected = history_selection(c)
+    query = {k: v for k, v in selected.items() if k not in c.selection}
+    return asyncio.run(
+        c.adapter.read(operation, c.selection, query if payload is None else payload)
+    )
+
+
+def test_P10_public_derive_preserves_signed_ieee_and_all_three_epochs(history_case):
+    c = history_case
+    value = history_read(c)
+    result = value["view"]["result"]
+    assert result["minimum"]["value"] == {"kind": "ieee", "type": "f64", "bits": "c010000000000000"}
+    assert result["maximum"]["value"]["bits"] == "8000000000000000"
+    assert [
+        result[k]
+        for k in ("observations", "updates", "finite_count", "nonfinite_count", "missing_count")
+    ] == ["4", "1", "2", "2", "0"]
+    assert result["units"] == "A/m^2"
+    assert value["view"]["history_cutoff"]["last_record"] == "6"
+    credits = value["view"]["credits"]
+    assert credits["stage_share"] == 44739242 and credits["reserved_bytes"] == 134217726
+    assert [e["phase"] for e in credits["epochs"]] == ["construction", "import", "derive_and_close"]
+    assert credits["actual_delivered_bytes"] == sum(
+        e["counters"]["bytes_read_total"] for e in credits["epochs"]
+    )
+    assert credits["metadata_readback_actual"] is None
+    assert len(c.catalog_calls) == 1 and c.catalog_calls[0]["point_id"] is None
+    assert value["view"]["scientific_acceptance"] == "not_assessed"
+
+
+@pytest.mark.parametrize("assessment", ["unknown", "different", "comparable"])
+def test_P10_actual_compare_one_owner_no_scientific_verdict(history_case, assessment):
+    c = history_case
+    left, right = history_selection(c), history_selection(c, 1)
+    comparison = dict.fromkeys(("model", "discretization", "protocol", "source"), assessment)
+    comparison.update(evidence=["NEW fixture only"], reason="Explicit author assessment")
+    value = history_read(
+        c, "compare-history", dict(left=left, right=right, comparability=comparison)
+    )
+    assert value["schema"] == "qcl-negf.portal-native-history-comparison.v1"
+    assert value["view"]["scientific_acceptance"] == "not_assessed"
+    assert value["assessment_origin"] == "author_declared"
+    assert value["left"]["point_attempt"] == "18446744073709551615"
+    assert value["left"]["source_state"] != value["right"]["source_state"]
+    assert value["view"]["differences"] == (
+        None
+        if assessment != "comparable"
+        else {
+            "minimum": {"kind": "ieee", "type": "f64", "bits": "0000000000000000"},
+            "maximum": {"kind": "ieee", "type": "f64", "bits": "0000000000000000"},
+        }
+    )
+    assert value["credits"]["stage_share"] == 22369621
+    assert len(value["credits"]["epochs"]) == 6 and len(c.catalog_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "change", ["model", "state", "manifest_media", "epoch", "pin", "absent", "missing"]
+)
+def test_P10_foreign_source_refuses_before_child(history_case, change):
+    c = history_case
+    v = history_selection(c)
+    if change == "model":
+        v["source_state"]["identity"]["model_sha256"] = "0" * 64
+    elif change == "state":
+        v["source_state"]["state_sequence"] = "2"
+    elif change == "manifest_media":
+        v["source_state"]["manifest"]["media_type"] = "application/foreign"
+    elif change == "epoch":
+        v["source_invocation"]["source_epoch"] = "foreign"
+    elif change == "pin":
+        v["retained"]["input_plan"]["sha256"] = "0" * 64
+    elif change == "missing":
+        v["point_id"] = "missing"
+        v["source_state"]["identity"]["point_id"] = "missing"
+    else:
+        p = c.catalog["binding"]["points"][0]
+        p["source"].update(
+            kind="absent",
+            selected_state=None,
+            observations=None,
+            diagnostics=None,
+            relation=None,
+            reason="not_recorded",
+        )
+        p["creator"] = p["source_invocation"] = None
+        _catalog_repin(c)
+        v["retained"] = history_selection(c, 1)["retained"]
+    c.adapter.worker = lambda *a: pytest.fail("foreign source opened child")
+    with pytest.raises(SavedResultError):
+        history_read(c, payload={k: x for k, x in v.items() if k not in c.selection})
+
+
+def test_P10_late_narrow_interval_reads_whole_prefix_and_batch_overshoot(history_case, monkeypatch):
+    from qcl_negf_results.state import StateReader
+
+    c = history_case
+    seen = []
+    original = StateReader.history_batch
+
+    def observed(self, *args, **kwargs):
+        batch = original(self, *args, **kwargs)
+        seen.append([r["stream_ordinal"] for r in batch.records])
+        return batch
+
+    monkeypatch.setattr(StateReader, "history_batch", observed)
+    v = history_selection(c)
+    v["reduction"].update(first_record="4", last_record="4")
+    result = history_read(c, payload={k: x for k, x in v.items() if k not in c.selection})
+    assert seen == [["1", "2", "3", "4", "5", "6"]]
+    assert result["view"]["result"]["observations"] == "1"
+    assert result["view"]["result"]["minimum"]["value"]["bits"] == "8000000000000000"
+    v["reduction"]["last_record"] = "7"
+    with pytest.raises(SavedResultError):
+        history_read(c, payload={k: x for k, x in v.items() if k not in c.selection})
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["copy", "copy_manifest", "io", "second_source", "reader_close", "domain_close", "response"],
+)
+def test_P10_pair_failure_never_publishes_partial_result(history_case, monkeypatch, phase):
+    from qcl_negf_results import live_views
+    from qcl_negf_results.state import StateReader
+
+    from qcl_negf_api import saved_nfs
+
+    c = history_case
+    left, right = history_selection(c), history_selection(c, 1)
+    assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "unknown")
+    assessment.update(evidence=[], reason="Test only")
+    pair = dict(left=left, right=right, comparability=assessment)
+    if phase == "copy":
+        monkeypatch.setattr(saved_nfs, "HISTORY_COPY", 1)
+        c.adapter.worker = lambda *a: pytest.fail("copy refused after child")
+    elif phase == "copy_manifest":
+        for point in c.catalog["binding"]["points"]:
+            point["source"]["selected_state"]["manifest"]["bytes"] = "10485760"
+        _catalog_repin(c)
+        pair.update(left=history_selection(c), right=history_selection(c, 1))
+        c.adapter.worker = lambda *a: pytest.fail("manifest copy forecast refused after child")
+    elif phase == "io":
+        monkeypatch.setattr(saved_nfs, "PAGE_IO", 18)
+    elif phase == "second_source":
+        (c.data / "p1" / "manifest.json").write_bytes(b"{}")
+    elif phase == "reader_close":
+        original = StateReader.close
+
+        def close(self):
+            original(self)
+            if self.root.name == "p1":
+                raise OSError("NEW close failure")
+
+        monkeypatch.setattr(StateReader, "close", close)
+    elif phase == "domain_close":
+        original = saved_nfs._NativeDomain.close
+
+        def close(self):
+            original(self)
+            if self.root.name == "p1":
+                raise OSError("NEW domain close failure")
+
+        monkeypatch.setattr(saved_nfs._NativeDomain, "close", close)
+    else:
+        original = live_views.compare_history
+
+        def oversized(*a, **k):
+            result = original(*a, **k)
+            result["left"]["units"] = "x" * (2 * 1024 * 1024)
+            return result
+
+        monkeypatch.setattr(live_views, "compare_history", oversized)
+    with pytest.raises(SavedResultError):
+        history_read(c, "compare-history", pair)
+
+
+def test_P10_two_distinct_owners_are_read_exactly_once(history_case):
+    c = history_case
+    left, right = history_selection(c), history_selection(c, 1)
+    right["run_uuid"] = "77777777-7777-4777-8777-777777777777"
+    calls = []
+
+    def getter(run, execution, **kwargs):
+        calls.append((run, kwargs["point_id"]))
+        dto = deepcopy(c.catalog)
+        dto["binding"]["selection"]["run_uuid"] = run
+        return dto
+
+    c.adapter.service.get_native_result_source = getter
+    assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "unknown")
+    assessment.update(evidence=[], reason="Test only")
+    result = history_read(
+        c, "compare-history", dict(left=left, right=right, comparability=assessment)
+    )
+    assert calls == [(left["run_uuid"], None), (right["run_uuid"], None)]
+    assert result["credits"]["metadata_readback_reserved"]["metadata_bytes"] == 671088640
+
+
+def test_P10_all_nonfinite_has_null_extrema(history_case, monkeypatch):
+    import result_v2_fixture as f
+
+    c = history_case
+    monkeypatch.setitem(f.IDENTITY, "point_id", "p0")
+    root = c.data / "fresh"
+    state = f.source(root, [f.record(1, 7, "7ff8000000000042"), f.record(2, 9, "fff0000000000000")])
+    p = c.catalog["binding"]["points"][0]
+    p["source"].update(selected_state=state, artifact_root="fresh")
+    _catalog_repin(c)
+    v = history_selection(c)
+    v["reduction"].update(first_record="1", last_record="2")
+    result = history_read(c, payload={k: x for k, x in v.items() if k not in c.selection})["view"][
+        "result"
+    ]
+    assert result["minimum"] is None and result["maximum"] is None
+    assert result["finite_count"] == "0" and result["nonfinite_count"] == "2"
+
+
+@pytest.mark.parametrize("mismatch", ["units", "field"])
+def test_P10_actual_public_comparison_mismatch_keeps_null_differences(
+    history_case, monkeypatch, mismatch
+):
+    import result_v2_fixture as f
+
+    c = history_case
+    monkeypatch.setitem(f.IDENTITY, "point_id", "p1")
+    row = f.record(1, 7, "4000000000000000")
+    if mismatch == "units":
+        row["core"]["fields"]["units"][0]["fields"]["second"] = "other_stored_unit"
+    else:
+        unit = deepcopy(row["core"]["fields"]["units"][0])
+        unit["fields"]["first"] = f.symbol("r_D")
+        unit["fields"]["second"] = "1"
+        row["core"]["fields"]["units"].append(unit)
+    state = f.source(c.data / "mismatch", [row])
+    c.catalog["binding"]["points"][1]["source"].update(
+        selected_state=state, artifact_root="mismatch"
+    )
+    _catalog_repin(c)
+    left, right = history_selection(c), history_selection(c, 1)
+    left["reduction"].update(first_record="1", last_record="1")
+    right["reduction"].update(
+        first_record="1", last_record="1", field="J" if mismatch == "units" else "r_D"
+    )
+    assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "comparable")
+    assessment.update(evidence=["NEW fixture"], reason="Author declaration only")
+    result = history_read(
+        c, "compare-history", dict(left=left, right=right, comparability=assessment)
+    )
+    assert result["view"]["differences"] is None
+
+
+def test_P10_cancelled_pair_holds_actual_gate_and_quarantines_unknown_cleanup(history_case):
+
+    c = history_case
+    entered, release = threading.Event(), threading.Event()
+
+    def worker(*args):
+        entered.set()
+        release.wait(2)
+        error = SavedResultError("unavailable_storage")
+        error.cleanup_unconfirmed = True
+        raise error
+
+    c.adapter.worker = worker
+    c.adapter.cleanup_seconds = 0.02
+    left, right = history_selection(c), history_selection(c, 1)
+    assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "unknown")
+    assessment.update(evidence=[], reason="NEW cancellation control")
+    pair = dict(left=left, right=right, comparability=assessment)
+
+    async def scenario():
+        task = asyncio.create_task(c.adapter.read("compare-history", c.selection, pair))
+        for _ in range(100):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert entered.is_set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert c.adapter.busy and c.adapter.active is not None and c.adapter.closed
+        with pytest.raises(SavedResultError, match="stopping"):
+            await c.adapter.read("compare-history", c.selection, pair)
+        release.set()
+        for _ in range(100):
+            if c.adapter.active is None:
+                break
+            await asyncio.sleep(0.005)
+        assert c.adapter.active is None and c.adapter.lease_cleanup_unconfirmed and c.adapter.busy
+        assert c.adapter.pending_spools
+        # This spool belongs to this NEW test and actual worker is now finished.
+        for spool in c.adapter.pending_spools:
+            spool.cleanup()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()

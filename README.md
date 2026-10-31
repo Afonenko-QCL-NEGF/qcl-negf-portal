@@ -125,8 +125,10 @@ scientific statuses сохраняются; ordinary run poll не запуск�
 Один isolated child читает только final sources выбранной страницы с prepaid
 constructor + brief/close I/O shares. См. [saved-results.md](docs/saved-results.md).
 
-Current/retrieved/performance producers, derive/comparison, actual used-value help
-и installed/browser/native/scientific gates остаются отдельными OPEN задачами.
+Явные derive/comparison для сохранённой истории реализованы через публичные Results API:
+пользователь закрепляет источники и диапазон, а научная сопоставимость остаётся его явным
+утверждением. См. [saved-results.md](docs/saved-results.md). Current/retrieved/performance
+consumers, actual used-value help и installed/browser/native/scientific gates остаются OPEN.
 Историческая binding integrity и getter readback
 limitations различаются; RO-наблюдение относится только к отдельному read request.
 

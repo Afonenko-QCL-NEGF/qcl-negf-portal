@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from test_saved_results import catalog_case as catalog_case
+from test_saved_results import history_case as history_case
+from test_saved_results import native_case as native_case
 
 from qcl_negf_api.api import create_app
 from qcl_negf_api.settings import Settings
@@ -197,3 +200,159 @@ def test_exact_point_refresh_without_manual_owner_pins():
             == 422
         )
         assert len(calls) == accepted_calls
+
+
+def test_P10_history_posts_strict_before_dispatch_and_never_get():
+    import asyncio
+    import json
+
+    import httpx2
+    from test_saved_results import SEL
+
+    calls = []
+
+    class Saved:
+        async def read(self, operation, selection, query, disconnect=None):
+            calls.append((operation, selection, query))
+            return {"operation": operation}
+
+        async def close(self):
+            pass
+
+    pin = dict(node_uuid=CODE, bytes="2", sha256="a" * 64)
+    state = dict(
+        identity=dict(
+            run_id="native",
+            execution_id="ex",
+            point_id="p",
+            attempt="1",
+            branch_id="branch",
+            model_sha256="a" * 64,
+            plan_sha256="b" * 64,
+        ),
+        state_id="s",
+        state_sequence="1",
+        manifest=dict(
+            path="manifest.json",
+            bytes="100",
+            sha256="c" * 64,
+            schema="qcl-negf.result-manifest.v1",
+            media_type="application/json",
+        ),
+    )
+    body = dict(
+        **SEL,
+        provider="native_nfs",
+        point_id="p",
+        retained=dict.fromkeys(
+            ("native_result", "native_binding", "input_plan", "source_graph"), pin
+        ),
+        source_state=state,
+        source_invocation={"source_epoch": "epoch"},
+        reduction=dict(stage="scba", field="J", first_record="1", last_record="2"),
+    )
+    single = {k: v for k, v in body.items() if k != "run_uuid"}
+    assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "unknown")
+    assessment.update(evidence=[], reason="Unassessed")
+    app = create_app(Settings(TOKEN, (CODE,)), SimpleNamespace(), saved_results=Saved())
+
+    async def pulse():
+        while True:
+            await asyncio.sleep(0.005)
+
+    async def scenario():
+        timer = asyncio.create_task(pulse())
+        try:
+            async with (
+                app.router.lifespan_context(app),
+                httpx2.AsyncClient(
+                    transport=httpx2.ASGITransport(app=app), base_url="http://test"
+                ) as client,
+            ):
+                path = f"/api/v1/runs/{RUN}/saved-results/"
+                h = {"Authorization": "Bearer " + TOKEN}
+                assert (await client.post(path + "derive-history", json=single)).status_code == 401
+                response = await client.post(path + "derive-history", json=single, headers=h)
+                assert response.status_code == 200
+                assert response.headers["cache-control"] == "no-store"
+                assert calls[-1][0] == "derive-history"
+                pair = dict(left=body, right=body, comparability=assessment)
+                assert (
+                    await client.post(path + "compare-history", json=pair, headers=h)
+                ).status_code == 200
+                n = len(calls)
+                for bad in (
+                    {**single, "unknown": 1},
+                    {**single, "attempt": True},
+                    {**single, "reduction": {**single["reduction"], "last_record": "02"}},
+                ):
+                    r = await client.post(path + "derive-history", json=bad, headers=h)
+                    assert r.status_code == 422 and r.headers["cache-control"] == "no-store"
+                duplicate = json.dumps(single)[:-1] + ',"attempt":2}'
+                for raw in (duplicate, " " * 65537, "[" * 70 + "0" + "]" * 70):
+                    assert (
+                        await client.post(path + "derive-history", content=raw, headers=h)
+                    ).status_code == 422
+                assert (
+                    await client.post(path + "derive-history?x=1", json=single, headers=h)
+                ).status_code == 422
+                assert (await client.get(path + "derive-history", headers=h)).status_code == 405
+                assert len(calls) == n
+        finally:
+            timer.cancel()
+            try:
+                await timer
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(scenario())
+
+
+def test_P10_actual_asgi_public_derive_and_pair(history_case):
+    import asyncio
+
+    import httpx2
+    from test_saved_results import history_selection
+
+    c = history_case
+    left, right = history_selection(c), history_selection(c, 1)
+    assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "unknown")
+    assessment.update(evidence=["NEW source/L fixture"], reason="Explicit author declaration")
+    app = create_app(Settings(TOKEN, (CODE,)), SimpleNamespace(), saved_results=c.adapter)
+
+    async def pulse():
+        while True:
+            await asyncio.sleep(0.005)
+
+    async def scenario():
+        timer = asyncio.create_task(pulse())
+        try:
+            async with (
+                app.router.lifespan_context(app),
+                httpx2.AsyncClient(
+                    transport=httpx2.ASGITransport(app=app), base_url="http://test"
+                ) as client,
+            ):
+                base = f"/api/v1/runs/{RUN}/saved-results/"
+                h = {"Authorization": "Bearer " + TOKEN}
+                single = {k: v for k, v in left.items() if k != "run_uuid"}
+                reply = await client.post(base + "derive-history", json=single, headers=h)
+                assert reply.status_code == 200 and reply.headers["cache-control"] == "no-store"
+                assert (
+                    reply.json()["view"]["result"]["maximum"]["value"]["bits"] == "8000000000000000"
+                )
+                reply = await client.post(
+                    base + "compare-history",
+                    json=dict(left=left, right=right, comparability=assessment),
+                    headers=h,
+                )
+                assert reply.status_code == 200 and reply.json()["view"]["differences"] is None
+                assert reply.json()["assessment_origin"] == "author_declared"
+        finally:
+            timer.cancel()
+            try:
+                await timer
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(scenario())

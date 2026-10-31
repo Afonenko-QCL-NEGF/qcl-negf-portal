@@ -224,9 +224,94 @@ change/removal немедленно снимает старый brief и инв�
 ## Remaining producer gates
 
 Native current bootstrap (R3), genuine retrieved rooted snapshot (R4), native
-performance (R5), derive/comparison и actual used-value help остаются отдельными
+performance (R5) и actual used-value help остаются отдельными
 контрактами. Human/agent report read/attach сохраняется.
 
 Synthetic tests exercise public native5 readers, actual isolated child cleanup,
 API transport and light source/SSR controls with explicitly synthetic RO facts.
 They do not establish actual NFS/profile/installed/browser or scientific acceptance.
+
+## Явные derive / compare сохранённой истории
+
+После ручного чтения страницы R1 закрепите левую точку. Для правой стороны
+введите явный Run UUID, отдельно получите его исполнения, выберите точный
+execution / transport attempt / CalcJob, прочитайте одну конечную страницу
+каталога и закрепите точку. Prev/next не обходят остальные страницы. Обе стороны
+показывают исходные четыре NodePin, полный StateRef, invocation, native attempt
+и отдельный transport attempt. Замена/снятие стороны, диапазона, поля, stage,
+assessment, token/run или refresh немедленно инвалидирует ожидаемый ответ.
+Двойное нажатие в одном turn допускает только один action. Ошибка не вызывает retry.
+
+Stage (`scba` или `outer`), direct IEEE scalar field из packaged Core layout,
+`first_record` и `last_record` вводятся явно. Границы — canonical positive UInt64
+строки включительно, без Number conversion; Portal не выбирает научных defaults.
+Один source использует POST `/api/v1/runs/{run_uuid}/saved-results/derive-history`.
+Body содержит ровно execution_id, safe positive transport attempt, calcjob_uuid,
+point_id, provider=native_nfs, retained (native_result/native_binding/input_plan/
+source_graph), полный source_state, source_invocation и reduction
+(stage/field/first_record/last_record). У NodePin ровно node_uuid/bytes/sha256,
+у manifest FileRef сохраняются все пять полей, у Identity все семь.
+
+POST `/api/v1/runs/{left_run_uuid}/saved-results/compare-history` принимает ровно
+left/right, каждая с собственным run_uuid и теми же остальными полями, и
+comparability. URL обязан совпадать с left.run_uuid. У comparability ровно
+model/discretization/protocol/source (каждый unknown/different/comparable),
+evidence (0–16 непустых текстовых locators до 4096 UTF-8 bytes каждый), reason
+(1–4096 bytes). Начальное значение статусов — unknown. Это author_declared,
+не Portal verdict. Unknown/different и несовпадающие field/units оставляют
+`differences=null`; только public Results возвращает исходные f64 IEEE delta.
+Процесс, сходимость, совпадение hashes и flags не доказывают научную сопоставимость.
+
+Оба POST требуют bearer/no-store, duplicate-free closed JSON≤64KiB, finite
+node/depth caps, canonical selectors и отсутствие query. Отказ происходит до
+actor/child, где это возможно. Parent ровно один раз читает original whole
+metadata (`point_id=None`) на каждый distinct provider tuple + binding UUID,
+максимум два. Две точки одного owner используют один DTO; после извлечения
+bounded selected rows whole DTO освобождается. Четыре genuine pins, selected
+StateRef, invocation, original creator и declared inventory сверяются заново.
+Отсутствующий row/source — отказ. Parent не открывает native roots.
+
+Только existing isolated child создаёт `_NativeDomain` и один public StateReader
+на сторону; сравнение одновременно держит два reader (до 8 owners при per-reader4).
+Public source.state/invocation должны полностью совпасть с запросом до derive;
+manifest SHA закрепляет frozen history cutoff. Range за cutoff отказывает.
+`import_history` читает весь frozen catalog; derive сканирует prefix от начала,
+а последний batch может захватить записи после last_record. Узкий диапазон
+**не** оценивает I/O. Никаких GET/background derive, новых maps или solver jobs нет.
+
+Предварительная source reservation: 128MiB на request, три nonrefundable public
+I/O epochs на source — construction, whole import и derive+close.
+`share=floor(128MiB/(3*N))`: 44739242 bytes при N=1, 22369621 при N=2;
+reservation обоих случаев 134217726 bytes. Каждый reader имеет этот maximum_io_bytes;
+compare получает 2*share и public owner вычитает actual left cost. Captured epochs
+измеряются до reset и после close, actual sum включает все 3/6 записей. Неиспользованный
+credit не возвращается, включая failure/cancellation. Отдельно резервируются ceiling
+каждого metadata owner: 320MiB metadata/256MiB logical I/O. Его actual ledger не
+возвращается публичным API: `metadata_readback_actual=null` с исходной причиной,
+без выдуманного pass или переноса credits в child.
+
+До public reduction резервируется copy/encoding workspace: два locator из whole
+catalog byte bound, одна unit из record byte bound, exact source/request wrappers
+и UInt64 counts. Exact pinned manifest bytes дополнительно ограничивают source status,
+cutoff и history-head FileRef. Шестикратный raw upper bound учитывает JSON escaping; три slots
+учитывают detached result, child/parent copies и encoding, плюс 64KiB wrapper.
+Локальная ceiling reservation 128MiB относится к logical copies, не RSS. Слишком
+большие units/locators, копии или aggregate response>2MiB дают all-or-nothing
+budget_exceeded, без truncation или новой model/schema границы.
+
+Derive возвращает selected-reader.v2 с operation=derive-history и закрытым view:
+result, source_invocation/history_cutoff/source_status/source_closed, input_plan,
+source_graph, credits и scientific_acceptance=not_assessed. Compare использует
+`qcl-negf.portal-native-history-comparison.v1`: exact left/right source receipts,
+view исходного compare, assessment_origin=author_declared, credits. В result
+пять counts (observations/updates/finite_count/nonfinite_count/missing_count)
+передаются точными decimal strings; IEEE f32/f64 tags/bits, -0/nonfinite, units/null,
+extrema/null, locators/coverage/derived_by сохраняются. Witness updates считаются
+отдельно, missing не заменяется нулём. JS отображает owning ответ без reduction,
+unit conversion или вычисления delta/acceptance.
+
+Все readers закрываются перед domains; ошибка close/domain, timeout/cancellation
+или отказ второй стороны запрещают partial publish. Actual future/gate,
+kill/reap, quarantine/deferred spool остаются прежними. SOURCE/L fixtures
+проверяют новые public calls, отказ второй стороны и отмену при открытом первом
+или втором reader, но не устанавливают installed RO/NFS, browser или science gates.

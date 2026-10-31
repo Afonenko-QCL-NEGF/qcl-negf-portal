@@ -409,6 +409,8 @@ def _native_point(dto, selection, query, *, metadata=False):
 
 
 def native_perform(adapter, operation, selection, query, cancelled, deadline, check):
+    if operation in {"derive-history", "compare-history"}:
+        return _history_perform(adapter, operation, selection, query, cancelled, deadline, check)
     if operation in {"sources", "brief"}:
         return _catalog_perform(adapter, operation, selection, query, cancelled, deadline, check)
     query = _native_query(operation, dict(query))
@@ -591,6 +593,8 @@ class _NativeDomain:
 
 def native_read_request(request):
     """Only the existing isolated child opens native bytes; owners close here."""
+    if request.get("operation") in {"derive-history", "compare-history"}:
+        return _history_read(request)
     if request.get("operation") == "brief":
         return _brief_page_read(request)
     from dataclasses import asdict
@@ -1372,3 +1376,661 @@ def _brief_page_read(request):
                     else:
                         raise
     return result
+
+
+# Explicit retained-history operations. These credits cover one request, never
+# scientific admission or host RSS. Numerical reductions belong only to Results.
+HISTORY_PINS = ("native_result", "native_binding", "input_plan", "source_graph")
+HISTORY_SELECTORS = ("run_uuid", "execution_id", "attempt", "calcjob_uuid")
+HISTORY_COUNTS = ("observations", "updates", "finite_count", "nonfinite_count", "missing_count")
+HISTORY_COPY = 128 * 1024 * 1024
+
+
+def _history_schema(name, value):
+    from qcl_negf_contracts import schema_validator
+
+    validator = schema_validator("result-common.schema.json")
+    try:
+        validator.evolve(
+            schema={"$ref": "#/$defs/" + name, "$defs": validator.schema["$defs"]}
+        ).validate(value)
+    except Exception as exc:
+        raise SavedResultError("selection_required") from exc
+
+
+def _history_selected(value):
+    from qcl_negf_results.live_views import ScalarReduction
+
+    keys = {
+        *HISTORY_SELECTORS,
+        "provider",
+        "point_id",
+        "retained",
+        "source_state",
+        "source_invocation",
+        "reduction",
+    }
+    if type(value) is not dict or set(value) != keys or value["provider"] != "native_nfs":
+        fail("selection_required")
+    uuid(value["run_uuid"])
+    uuid(value["calcjob_uuid"])
+    for k in ("execution_id", "point_id"):
+        if type(value[k]) is not str or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value[k]
+        ):
+            fail("selection_required")
+    if type(value["attempt"]) is not int or not 1 <= value["attempt"] <= 9007199254740991:
+        fail("selection_required")
+    if type(value["retained"]) is not dict or set(value["retained"]) != set(HISTORY_PINS):
+        fail("selection_required")
+    for p in value["retained"].values():
+        _node_pin(p)
+    _history_schema("StateRef", value["source_state"])
+    _history_schema("Invocation", value["source_invocation"])
+    if (
+        value["source_state"]["identity"]["execution_id"] != value["execution_id"]
+        or value["source_state"]["identity"]["point_id"] != value["point_id"]
+    ):
+        fail("identity_mismatch")
+    r = value["reduction"]
+    if type(r) is not dict or set(r) != {"stage", "field", "first_record", "last_record"}:
+        fail("selection_required")
+    try:
+        ScalarReduction(**r)
+    except ValueError, TypeError:
+        fail("selection_required")
+    return value
+
+
+def history_query(operation, selection, query):
+    """Closed, finite metadata admission before actor dispatch or any child."""
+    if len(canonical(query)) > 65536:
+        fail("budget_exceeded")
+    if operation == "derive-history":
+        values, assessment = [_history_selected({**selection, **query})], None
+        if set(query) != {
+            "provider",
+            "point_id",
+            "retained",
+            "source_state",
+            "source_invocation",
+            "reduction",
+        }:
+            fail("selection_required")
+    elif operation == "compare-history":
+        if type(query) is not dict or set(query) != {"left", "right", "comparability"}:
+            fail("selection_required")
+        values = [_history_selected(query[k]) for k in ("left", "right")]
+        if not same({k: values[0][k] for k in HISTORY_SELECTORS}, selection):
+            fail("identity_mismatch")
+        assessment = query["comparability"]
+        if (
+            type(assessment) is not dict
+            or set(assessment)
+            != {"model", "discretization", "protocol", "source", "evidence", "reason"}
+            or any(
+                assessment[k] not in ("unknown", "different", "comparable")
+                for k in ("model", "discretization", "protocol", "source")
+            )
+            or type(assessment["evidence"]) is not list
+            or len(assessment["evidence"]) > 16
+        ):
+            fail("selection_required")
+        for text in [assessment["reason"], *assessment["evidence"]]:
+            if type(text) is not str or not 1 <= len(text.encode("utf-8")) <= 4096:
+                fail("selection_required")
+    else:
+        fail("selection_required")
+    return values, assessment
+
+
+def _history_forecast(points):
+    # Each source can return two catalog locators and one record-sized unit.
+    # The exact pinned manifest byte size also bounds returned cutoff/status
+    # strings and the history-head FileRef; those are not catalog locators.
+    # x6 bounds JSON escaping before producing any detached native result;
+    # three slots reserve native detach, child/parent copies and JSON encoding.
+    # Source/request wrappers are exact admitted bytes; counts have UInt64 width.
+    raw = sum(
+        6
+        * (
+            2 * METADATA
+            + METADATA
+            + int(p["selected"]["source_state"]["manifest"]["bytes"])
+            + len(canonical(p))
+        )
+        + 16384
+        for p in points
+    )
+    reserved = 3 * raw + 65536
+    if reserved > HISTORY_COPY:
+        fail("budget_exceeded")
+    return dict(
+        raw_result_upper_bound=raw,
+        copies_and_encoding=3,
+        reserved_bytes=reserved,
+        maximum_bytes=HISTORY_COPY,
+        nonrefundable=True,
+        basis="two_catalog_locators_plus_record_unit_and_exact_source_wrappers",
+    )
+
+
+def _history_perform(adapter, operation, selection, query, cancelled, deadline, check):
+    values, assessment = history_query(operation, selection, query)
+    method = getattr(adapter.service, "get_native_result_source", None)
+    if not callable(method):
+        fail("unsupported_contract")
+    # Group first, so two points of one owner share its original whole DTO.
+    groups = {}
+    for index, v in enumerate(values):
+        key = canonical(
+            [{k: v[k] for k in HISTORY_SELECTORS}, v["retained"]["native_binding"]["node_uuid"]]
+        )
+        groups.setdefault(key, []).append((index, v))
+    points = [None] * len(values)
+    receipts = [None] * len(values)
+    # Reserve both public owner ceilings before the first read. No getter exposes
+    # an actual ledger, so these nonrefundable slots never become measured credit.
+    metadata_reserved = _history_credits(len(values), len(groups), None)[
+        "metadata_readback_reserved"
+    ]
+    local = adapter.binding
+    if local is None:
+        fail("unavailable_storage")
+    for group in groups.values():
+        v = group[0][1]
+        owner = {k: v[k] for k in HISTORY_SELECTORS}
+        check()
+        dto = method(
+            v["run_uuid"],
+            v["execution_id"],
+            attempt=v["attempt"],
+            calcjob_uuid=v["calcjob_uuid"],
+            point_id=None,
+            binding_uuid=v["retained"]["native_binding"]["node_uuid"],
+        )
+        check()
+        binding, pins, declared, selected = _catalog_dto(dto, owner)
+        storage = binding["storage"]
+        if (
+            any(storage.get(k) != local[k] for k in REFS)
+            or storage.get("computer_uuid") not in local["allowed_computer_uuids"]
+        ):
+            fail("unavailable_storage")
+        for index, v in group:
+            if not same(v["retained"], pins):
+                fail("source_changed")
+            if v["point_id"] not in selected:
+                fail("capability_unavailable")
+            p = selected[v["point_id"]][0]
+            source = p["source"]
+            if source["kind"] == "absent":
+                fail("capability_unavailable")
+            if not same(source["selected_state"], v["source_state"]) or not same(
+                p["source_invocation"], v["source_invocation"]
+            ):
+                fail("source_changed")
+            relative = path(storage["relative_execution_root"])
+            if source["artifact_root"] != ".":
+                relative = path(relative + "/" + path(source["artifact_root"]))
+            # Detach only bounded selected records; never retain a whole previous owner.
+            points[index] = _json(
+                canonical(dict(selected=v, source=source, relative_root=relative))
+            )
+            receipts[index] = _json(
+                canonical(
+                    dict(
+                        provider_selection={k: v[k] for k in HISTORY_SELECTORS},
+                        point_id=v["point_id"],
+                        point_attempt=str(p["point_attempt"]),
+                        retained=dict(
+                            **pins,
+                            creator=p["creator"],
+                            integrity=dict(
+                                readback=dto["integrity"], original_binding=binding["integrity"]
+                            ),
+                        ),
+                        source_state=v["source_state"],
+                        source_invocation=v["source_invocation"],
+                    )
+                )
+            )
+        del dto, binding, pins, declared, selected, p, source, storage
+    forecast = _history_forecast(points)
+    request = dict(
+        binding=local,
+        binding_sha256=sha(canonical(local)),
+        points=points,
+        comparability=assessment,
+        owner_count=len(groups),
+        metadata_reserved=metadata_reserved,
+        copy_workspace=forecast,
+    )
+    _bytes(request)
+    spool = tempfile.TemporaryDirectory(prefix="qcl-native-history-")
+    primary = None
+    try:
+        check()
+        result = adapter.worker(operation, request, Path(spool.name), cancelled, deadline)
+        check()
+        _history_reply(
+            result, points, operation, assessment, len(groups), forecast, request["binding_sha256"]
+        )
+        for r, actual in zip(receipts, result["sources"], strict=True):
+            r.update(actual)
+        if operation == "derive-history":
+            r, v = receipts[0], result["view"]
+            answer = dict(
+                schema="qcl-negf.portal-selected-reader.v2",
+                operation=operation,
+                provider_selection=selection,
+                provider="native_nfs",
+                selection_mode="retained",
+                source_state=r["source_state"],
+                retained={
+                    k: r["retained"][k]
+                    for k in ("native_result", "native_binding", "creator", "integrity")
+                },
+                access=r["access"],
+                view=dict(
+                    result=v,
+                    source_invocation=r["source_invocation"],
+                    history_cutoff=r["history_cutoff"],
+                    source_status=r["source_status"],
+                    source_closed=r["source_closed"],
+                    input_plan=r["retained"]["input_plan"],
+                    source_graph=r["retained"]["source_graph"],
+                    credits=result["credits"],
+                    scientific_acceptance="not_assessed",
+                ),
+            )
+        else:
+            answer = dict(
+                schema="qcl-negf.portal-native-history-comparison.v1",
+                operation=operation,
+                left=receipts[0],
+                right=receipts[1],
+                view=result["view"],
+                assessment_origin="author_declared",
+                credits=result["credits"],
+            )
+        _bytes(answer)
+        return answer
+    except BaseException as exc:
+        primary = exc
+        if getattr(exc, "cleanup_unconfirmed", False):
+            adapter.closed = adapter.lease_cleanup_unconfirmed = True
+            adapter.pending_spools.append(spool)
+            spool = None
+        raise
+    finally:
+        if spool is not None:
+            try:
+                spool.cleanup()
+            except OSError as exc:
+                adapter.closed = adapter.lease_cleanup_unconfirmed = True
+                adapter.pending_spools.append(spool)
+                if primary is not None:
+                    primary.cleanup_unconfirmed = True
+                else:
+                    error = SavedResultError("unavailable_storage")
+                    error.cleanup_unconfirmed = True
+                    raise error from exc
+
+
+def _history_credits(count, owners, forecast):
+    share = PAGE_IO // (3 * count)
+    return dict(
+        source_io_total=PAGE_IO,
+        epochs_per_source=3,
+        source_count=count,
+        stage_share=share,
+        reserved_bytes=3 * count * share,
+        actual_delivered_bytes=0,
+        epochs=[],
+        metadata_readback_reserved=dict(
+            owners=owners,
+            metadata_bytes=owners * 320 * 1024 * 1024,
+            logical_io_bytes=owners * 256 * 1024 * 1024,
+        ),
+        metadata_readback_actual=None,
+        metadata_readback_actual_reason="not_returned_by_public_owner_API",
+        copy_workspace=forecast,
+        scope="logical_source_metadata_copy_credit_not_RSS",
+    )
+
+
+def _history_read(request):
+    from qcl_negf_results.live_views import ScalarReduction, compare_history, derive_history
+    from qcl_negf_results.state import ResultReadLimits, StateReader
+
+    if set(request) != {
+        "operation",
+        "binding",
+        "binding_sha256",
+        "points",
+        "comparability",
+        "owner_count",
+        "metadata_reserved",
+        "copy_workspace",
+    }:
+        fail("selection_required")
+    operation, points = request["operation"], request["points"]
+    if type(points) is not list or len(points) != (1 if operation == "derive-history" else 2):
+        fail("selection_required")
+    values = [_history_selected(p["selected"]) for p in points]
+    selection = {k: values[0][k] for k in HISTORY_SELECTORS}
+    query = (
+        {k: v for k, v in values[0].items() if k not in HISTORY_SELECTORS}
+        if operation == "derive-history"
+        else dict(left=values[0], right=values[1], comparability=request["comparability"])
+    )
+    history_query(operation, selection, query)
+    owners = len(
+        {
+            canonical(
+                [{k: v[k] for k in HISTORY_SELECTORS}, v["retained"]["native_binding"]["node_uuid"]]
+            )
+            for v in values
+        }
+    )
+    forecast = _history_forecast(points)
+    if (
+        type(request["owner_count"]) is not int
+        or request["owner_count"] != owners
+        or not same(forecast, request["copy_workspace"])
+        or operation == "derive-history"
+        and request["comparability"] is not None
+    ):
+        fail("identity_mismatch")
+    binding = validate_binding(request["binding"])
+    if sha(canonical(binding)) != request["binding_sha256"]:
+        fail("identity_mismatch")
+    credits = _history_credits(len(points), owners, forecast)
+    if not same(credits["metadata_readback_reserved"], request["metadata_reserved"]):
+        fail("identity_mismatch")
+    share = credits["stage_share"]
+    readers, domains, sources, epochs = [], [], [], []
+    primary = None
+    try:
+        for index, (p, v) in enumerate(zip(points, values, strict=True)):
+            if set(p) != {"selected", "source", "relative_root"} or not same(
+                p["source"]["selected_state"], v["source_state"]
+            ):
+                fail("identity_mismatch")
+            domain = _NativeDomain(binding, path(p["relative_root"]))
+            domains.append(domain)
+            reader = StateReader(
+                domain.root,
+                state_ref=v["source_state"],
+                expected_identity=v["source_state"]["identity"],
+                limits=ResultReadLimits(
+                    maximum_metadata_bytes=METADATA,
+                    maximum_io_bytes=share,
+                    maximum_catalog_pages=4096,
+                    maximum_catalog_entries=4096,
+                    maximum_catalog_bytes=METADATA,
+                    maximum_open_files=4,
+                    maximum_batch_bytes=METADATA,
+                    maximum_record_bytes=METADATA,
+                    maximum_batch_records=256,
+                    maximum_hdf_objects=4096,
+                    maximum_array_bytes=METADATA,
+                ),
+            )
+            readers.append(reader)
+            epochs.append(
+                dict(source=index, phase="construction", counters=dict(reader.io_counters))
+            )
+            description = reader.source
+            if not same(description.state, v["source_state"]) or not same(
+                description.invocation, v["source_invocation"]
+            ):
+                fail("source_changed")
+            if int(v["reduction"]["last_record"]) > int(description.history["last_record"]):
+                fail("selection_required")
+            reader.import_history()
+            epochs.append(dict(source=index, phase="import", counters=dict(reader.io_counters)))
+            sources.append(
+                dict(
+                    history_cutoff=description.history,
+                    source_status=description.status,
+                    source_closed=description.closed,
+                    access=dict(
+                        status="checked_ro_current_request",
+                        method="local_binding_mountinfo_nofollow_domain",
+                        config_sha256=request["binding_sha256"],
+                    ),
+                )
+            )
+        reductions = [ScalarReduction(**v["reduction"]) for v in values]
+        if operation == "derive-history":
+            view = derive_history(readers[0], reductions[0], maximum_io_bytes=share)
+        else:
+            view = compare_history(
+                readers[0],
+                readers[1],
+                left_request=reductions[0],
+                right_request=reductions[1],
+                comparability=request["comparability"],
+                maximum_io_bytes=2 * share,
+            )
+        # Close every reader before domains; one failed close must not skip another.
+        first = None
+        for index, reader in enumerate(readers):
+            try:
+                reader.close()
+            except BaseException as exc:
+                first = first or exc
+            epochs.append(
+                dict(source=index, phase="derive_and_close", counters=dict(reader.io_counters))
+            )
+        readers.clear()
+        if first is not None:
+            raise first
+        for domain in domains:
+            domain.check()
+        results = [view] if operation == "derive-history" else [view["left"], view["right"]]
+        for result in results:
+            for k in HISTORY_COUNTS:
+                result[k] = str(result[k])
+        credits["epochs"] = sorted(
+            epochs,
+            key=lambda e: (
+                e["source"],
+                ("construction", "import", "derive_and_close").index(e["phase"]),
+            ),
+        )
+        credits["actual_delivered_bytes"] = sum(e["counters"]["bytes_read_total"] for e in epochs)
+        result = dict(view=view, sources=sources, credits=credits)
+        _history_reply(
+            result,
+            points,
+            operation,
+            request["comparability"],
+            owners,
+            forecast,
+            request["binding_sha256"],
+        )
+        _bytes(result)
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        errors = []
+        for owner in [*reversed(readers), *reversed(domains)]:
+            try:
+                owner.close()
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            if primary is not None:
+                primary.cleanup_unconfirmed = True
+            else:
+                raise errors[0]
+    return result
+
+
+def _history_reply(result, points, operation, assessment, owners, forecast, binding_sha):
+    if type(result) is not dict or set(result) != {"view", "sources", "credits"}:
+        fail()
+    credits = result["credits"]
+    expected = _history_credits(len(points), owners, forecast)
+    if (
+        type(credits) is not dict
+        or set(credits) != set(expected)
+        or any(
+            not same(credits[k], v)
+            for k, v in expected.items()
+            if k not in ("epochs", "actual_delivered_bytes")
+        )
+        or type(credits["epochs"]) is not list
+        or len(credits["epochs"]) != 3 * len(points)
+    ):
+        fail()
+    measured = 0
+    counter_keys = {
+        "bytes_read_total",
+        "sha_bytes",
+        "hdf_bytes",
+        "metadata_bytes",
+        "logical_selected_bytes",
+        "maximum_io_bytes",
+    }
+    for index, epoch in enumerate(credits["epochs"]):
+        phase = ("construction", "import", "derive_and_close")[index % 3]
+        if (
+            type(epoch) is not dict
+            or set(epoch) != {"source", "phase", "counters"}
+            or epoch["source"] != index // 3
+            or epoch["phase"] != phase
+        ):
+            fail()
+        c = epoch["counters"]
+        if (
+            type(c) is not dict
+            or set(c) != counter_keys
+            or any(type(v) is not int or v < 0 for v in c.values())
+            or c["maximum_io_bytes"] != credits["stage_share"]
+            or c["bytes_read_total"] > credits["stage_share"]
+            or c["bytes_read_total"] != c["sha_bytes"] + c["hdf_bytes"] + c["metadata_bytes"]
+        ):
+            fail()
+        measured += c["bytes_read_total"]
+    if (
+        type(credits["actual_delivered_bytes"]) is not int
+        or credits["actual_delivered_bytes"] != measured
+    ):
+        fail()
+    view = result["view"]
+    if operation == "compare-history":
+        if (
+            type(view) is not dict
+            or set(view)
+            != {"left", "right", "comparability", "differences", "scientific_acceptance"}
+            or not same(view["comparability"], assessment)
+            or view["scientific_acceptance"] != "not_assessed"
+        ):
+            fail("identity_mismatch")
+        if any(
+            assessment[k] != "comparable" for k in ("model", "discretization", "protocol", "source")
+        ):
+            if view["differences"] is not None:
+                fail()
+        if view["differences"] is not None:
+            if type(view["differences"]) is not dict or set(view["differences"]) != {
+                "minimum",
+                "maximum",
+            }:
+                fail()
+            for atom in view["differences"].values():
+                if atom is not None:
+                    _history_ieee(atom, difference=True)
+        results = [view["left"], view["right"]]
+    else:
+        results = [view]
+    if type(result["sources"]) is not list or len(result["sources"]) != len(points):
+        fail()
+    for p, actual, derived in zip(points, result["sources"], results, strict=True):
+        v = p["selected"]
+        if (
+            type(actual) is not dict
+            or set(actual) != {"history_cutoff", "source_status", "source_closed", "access"}
+            or type(actual["source_closed"]) is not bool
+            or actual["access"]
+            != dict(
+                status="checked_ro_current_request",
+                method="local_binding_mountinfo_nofollow_domain",
+                config_sha256=binding_sha,
+            )
+        ):
+            fail()
+        _history_schema("HistoryPin", actual["history_cutoff"])
+        _history_schema("Status", actual["source_status"])
+        if (
+            type(derived) is not dict
+            or set(derived)
+            != {
+                "source",
+                "request",
+                "units",
+                *HISTORY_COUNTS,
+                "minimum",
+                "maximum",
+                "coverage",
+                "io_counters",
+                "derived_by",
+            }
+            or not same(derived["source"], v["source_state"])
+            or not same(derived["request"], v["reduction"])
+            or derived["derived_by"] != "qcl_negf_results.live_views.derive_history.v1"
+            or derived["units"] is not None
+            and type(derived["units"]) is not str
+            or not same(
+                derived["coverage"],
+                dict(
+                    first_record=v["reduction"]["first_record"],
+                    last_record=v["reduction"]["last_record"],
+                    witness_updates="counted_separately_no_scalar_replacement",
+                ),
+            )
+        ):
+            fail("identity_mismatch")
+        for k in HISTORY_COUNTS:
+            if (
+                type(derived[k]) is not str
+                or not re.fullmatch(r"0|[1-9][0-9]{0,19}", derived[k])
+                or int(derived[k]) > 2**64 - 1
+            ):
+                fail()
+        for k in ("minimum", "maximum"):
+            sample = derived[k]
+            if sample is None:
+                continue
+            if type(sample) is not dict or set(sample) != {"value", "locator"}:
+                fail()
+            _history_ieee(sample["value"])
+            locator = sample["locator"]
+            _history_schema("RowLocator", locator)
+            if (
+                not same(locator["source_identity"], v["source_state"]["identity"])
+                or locator["source_epoch"] != v["source_invocation"]["source_epoch"]
+                or not int(v["reduction"]["first_record"])
+                <= int(locator["append_ordinal"])
+                <= int(v["reduction"]["last_record"])
+            ):
+                fail("identity_mismatch")
+
+
+def _history_ieee(atom, *, difference=False):
+    if (
+        type(atom) is not dict
+        or set(atom) != {"kind", "type", "bits"}
+        or atom["kind"] != "ieee"
+        or atom["type"] not in (("f64",) if difference else ("f32", "f64"))
+        or type(atom["bits"]) is not str
+        or not re.fullmatch(
+            "[0-9a-f]{" + str(16 if atom["type"] == "f64" else 8) + "}", atom["bits"]
+        )
+    ):
+        fail()

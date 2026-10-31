@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
@@ -19,20 +20,38 @@ AUTH = {'Authorization': f'Bearer {TOKEN}'}
 QUERY = {'fragment_id': 'unpublished-id', 'execution_id': 'execution-1',
          'point_id': 'point-1', 'attempt': '2', 'calcjob_uuid': CHILD}
 
+def runner_plan_bytes():
+    # Synthetic plan-only output from Runner 9617 / Core 01d; no solve ran.
+    raw = (Path(__file__).parent / 'fixtures/model-help/runner-9617-plan.json').read_bytes()
+    assert len(raw) == 126463
+    assert hashlib.sha256(raw).hexdigest() == (
+        'f9717a93436f1cdff83744fe5b37d4eb9f93349a71c15f573c68cc60eb17deb2')
+    return raw
+
+
 @pytest.fixture
-def dto():
-    raw = (Path(__file__).parent / 'fixtures/model-help-plan.json').read_bytes()
+def dto(monkeypatch):
+    # Exercise the published AiiDA read boundary with a synthetic in-memory actor.
+    from aiida_qcl_negf import service
+
+    raw = runner_plan_bytes()
     plan = json.loads(raw)
     assert 'configuration' not in plan['points'][0]
-    return {'context': {'run_uuid': RUN, 'calcjob_uuid': CHILD, 'attempt': 2,
-        'execution_id': 'execution-1', 'point_id': 'point-1',
-        'plan_fingerprint': plan['fingerprint'],
-        'scientific_fingerprint': plan['scientific_fingerprint'],
-        'model_revision': plan['model_revision'],
-        'configuration_hash': plan['points'][0]['effective_inputs']['configuration_hash']},
-        'frozen_plan': {'bytes': raw, 'sha256': hashlib.sha256(raw).hexdigest()},
-        'snapshot': None, 'release_id': 'recorded-A',
-        'input_status': {'status': 'unavailable', 'reason': 'inventory_unavailable'}}
+    class Input:
+        def open(self, mode):
+            assert mode == 'rb'
+            return BytesIO(raw)
+    node = SimpleNamespace(uuid=RUN, inputs=SimpleNamespace(
+        plan=Input(), release_id=SimpleNamespace(value='recorded-A')), outputs={})
+    child = SimpleNamespace(uuid=CHILD, inputs=SimpleNamespace(
+        execution_id=SimpleNamespace(value='execution-1'),
+        attempt=SimpleNamespace(value=2)), outputs={})
+    monkeypatch.setattr(service, '_node', lambda _: node)
+    monkeypatch.setattr(service, '_children', lambda _: [child])
+    result = service.get_model_help_input(RUN, 'execution-1', 'point-1',
+                                          attempt=2, calcjob_uuid=CHILD)
+    assert result['frozen_plan'] == {'bytes': raw, 'sha256': hashlib.sha256(raw).hexdigest()}
+    return result
 
 
 def test_ordinary_plan_unknown_is_not_current_docs(dto, monkeypatch):
@@ -48,14 +67,37 @@ def test_ordinary_plan_unknown_is_not_current_docs(dto, monkeypatch):
     assert view['input_status'] == dto['input_status']
 
 
-@pytest.mark.parametrize('change', ['digest', 'fingerprint', 'point'])
+@pytest.mark.parametrize('change', ['digest', 'raw_bytes', 'fingerprint', 'point'])
 def test_supplied_contradiction_fails_closed(dto, change):
     if change == 'digest':
         dto['frozen_plan']['sha256'] = '0' * 64
+    if change == 'raw_bytes':
+        dto['frozen_plan']['bytes'] += b' '
     if change == 'fingerprint':
         dto['context']['plan_fingerprint'] = '0' * 64
     if change == 'point':
         dto['context']['point_id'] = 'not-a-member'
+    with pytest.raises(ValueError):
+        model_help_view(dto)
+
+
+@pytest.mark.parametrize('change', ['missing_model_sha256', 'wrong_axis', 'wrong_encoding',
+                                    'wrong_model_revision', 'wrong_configuration_hash'])
+def test_nested_passport_and_source_identity_fail_closed(dto, change):
+    plan = json.loads(dto['frozen_plan']['bytes'])
+    point = plan['points'][0]
+    if change == 'missing_model_sha256':
+        del point['effective_inputs']['model_sha256']
+    elif change == 'wrong_axis':
+        point['effective_inputs']['temperature_K'] += 1
+    elif change == 'wrong_encoding':
+        point['effective_inputs']['hash_encoding'] = 'unknown'
+    elif change == 'wrong_model_revision':
+        dto['context']['model_revision'] = 'different-source'
+    elif change == 'wrong_configuration_hash':
+        dto['context']['configuration_hash'] = '0' * 64
+    raw = json.dumps(plan).encode()
+    dto['frozen_plan'] = {'bytes': raw, 'sha256': hashlib.sha256(raw).hexdigest()}
     with pytest.raises(ValueError):
         model_help_view(dto)
 

@@ -235,3 +235,27 @@ def test_domain_initialization_cleanup_cannot_mask_primary_selection_failure(
     with pytest.raises(SavedResultError, match="identity_mismatch") as caught:
         read(native_case, "manifest")
     assert caught.value.cleanup_unconfirmed and native_case.adapter.closed
+
+
+def test_metadata_pins_bind_next_reader_and_foreign_full_state_is_refused(native_case):
+    import asyncio
+
+    from test_saved_results import metadata_read
+
+    source = metadata_read(native_case)
+    query = dict(
+        provider="native_nfs",
+        point_id=source["point"]["point_id"],
+        native_binding_uuid=source["retained"]["native_binding"]["node_uuid"],
+        state_manifest_sha256=source["source_state"]["manifest"]["sha256"],
+    )
+
+    async def run():
+        return await native_case.adapter.read("manifest", native_case.selection, query)
+
+    result = asyncio.run(run())
+    assert result["source_state"] == source["source_state"]
+    wrong = deepcopy(source["source_state"])
+    wrong["state_id"] = "stale"
+    with pytest.raises(SavedResultError, match="identity_mismatch"):
+        read(native_case, "slice", dict(source_state=wrong, view_id="density", selection=[0]))

@@ -713,8 +713,8 @@ function App() {
                         Request cancellation
                       </button>
                     )}
-                    <RunStructure key={detail.uuid} run={detail} />
-                    <SavedResultsPanel key={detail.uuid} token={token} run={detail} />
+                    <RunStructure key={`structure-${detail.uuid}`} run={detail} />
+                    <SavedResultsPanel key={`saved-${detail.uuid}`} token={token} run={detail} />
                     <LivePerformance key={`live-${detail.uuid}`} token={token} run={detail} />
                     {detail.children && detail.children.length > 0 && (
                       <>

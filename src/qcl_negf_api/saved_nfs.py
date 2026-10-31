@@ -217,7 +217,11 @@ def _access(alias, relative, paths, *, mountinfo=None):
 # Native5 retained-point transport. Legacy registration/closure functions above
 # are not a native reader and are not dispatched by SavedResults.
 def _native_query(operation, query):
-    required = {"provider", "point_id", "native_binding_uuid", "state_manifest_sha256"}
+    required = (
+        {"point_id"}
+        if operation == "point-source"
+        else {"provider", "point_id", "native_binding_uuid", "state_manifest_sha256"}
+    )
     extra = (
         {"view_id", "selection", "source_state"}
         if operation == "slice"
@@ -226,16 +230,18 @@ def _native_query(operation, query):
         else set()
     )
     if (
-        operation not in {"manifest", "diagnostics", "slice", "history"}
+        operation not in {"point-source", "manifest", "diagnostics", "slice", "history"}
         or set(query) != required | extra
     ):
         fail("selection_required")
-    if query["provider"] != "native_nfs":
+    if operation != "point-source" and query["provider"] != "native_nfs":
         fail("unsupported_contract")
     if not isinstance(query["point_id"], str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", query["point_id"]
     ):
         fail("selection_required")
+    if operation == "point-source":
+        return dict(query)
     uuid(query["native_binding_uuid"])
     try:
         digest(query["state_manifest_sha256"])
@@ -276,7 +282,7 @@ def _native_query(operation, query):
     return dict(query)
 
 
-def _native_point(dto, selection, query):
+def _native_point(dto, selection, query, *, metadata=False):
     """Check detached original owner relations; this never grants data access."""
     from qcl_negf_contracts import schema_validator
 
@@ -302,18 +308,51 @@ def _native_point(dto, selection, query):
             binding.get("schema") != "qcl-negf.aiida-native-binding.v1"
             or not same(binding["selection"], selection)
             or point["point_id"] != query["point_id"]
-            or dto["native_binding"]["node_uuid"] != query["native_binding_uuid"]
+            or (not metadata and dto["native_binding"]["node_uuid"] != query["native_binding_uuid"])
             or [p for p in binding["points"] if p["point_id"] == query["point_id"]] != [point]
         ):
             fail("identity_mismatch")
+        if (
+            set(point)
+            != {
+                "point_id",
+                "point_attempt",
+                "source",
+                "source_invocation",
+                "creator",
+                "plan_point_id",
+                "coordinates",
+            }
+            or point["plan_point_id"] != query["point_id"]
+            or type(point["point_attempt"]) is not int
+            or not 1 <= point["point_attempt"] <= 9007199254740991
+            or not 1 <= selection["attempt"] <= 9007199254740991
+        ):
+            fail("corrupt_result")
+        creator = point["creator"]
+        if point["source"]["kind"] == "absent":
+            if creator is not None or point["source_invocation"] is not None:
+                fail("corrupt_result")
+        else:
+            if type(creator) is not dict or set(creator) != {"calcjob_uuid", "binding_uuid"}:
+                fail("corrupt_result")
+            stored_uuid(creator["calcjob_uuid"])
+            if creator["binding_uuid"] is not None:
+                stored_uuid(creator["binding_uuid"])
+            if (creator["calcjob_uuid"] == selection["calcjob_uuid"]) != (
+                creator["binding_uuid"] is None
+            ):
+                fail("identity_mismatch")
         for key in ("native_result", "native_binding"):
             pin = dto[key]
             if type(pin) is not dict or set(pin) != {"node_uuid", "bytes", "sha256"}:
                 fail()
             stored_uuid(pin["node_uuid"])
             digest(pin["sha256"])
-            if not isinstance(pin["bytes"], str) or not re.fullmatch(
-                r"0|[1-9][0-9]{0,19}", pin["bytes"]
+            if (
+                not isinstance(pin["bytes"], str)
+                or not re.fullmatch(r"0|[1-9][0-9]{0,19}", pin["bytes"])
+                or int(pin["bytes"]) > 18446744073709551615
             ):
                 fail()
         raw = dto["result_utf8"].encode("utf-8")
@@ -342,15 +381,19 @@ def _native_point(dto, selection, query):
             schema={"$ref": "#/$defs/NativePointSource", "$defs": validator.schema["$defs"]}
         ).validate(source)
         if source["kind"] == "absent":
+            if metadata:
+                return point, source
             fail("capability_unavailable")
         state = source["selected_state"]
+        _path(state["manifest"]["path"])
         if (
             state["identity"]["execution_id"] != selection["execution_id"]
             or state["identity"]["point_id"] != query["point_id"]
         ):
             fail("identity_mismatch")
-        if state["manifest"]["sha256"] != query["state_manifest_sha256"] or (
-            "source_state" in query and not same(query["source_state"], state)
+        if not metadata and (
+            state["manifest"]["sha256"] != query["state_manifest_sha256"]
+            or ("source_state" in query and not same(query["source_state"], state))
         ):
             fail("identity_mismatch")
         return point, source
@@ -364,6 +407,11 @@ def _native_point(dto, selection, query):
 
 def native_perform(adapter, operation, selection, query, cancelled, deadline, check):
     query = _native_query(operation, dict(query))
+    if operation == "point-source" and (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", selection["execution_id"])
+        or selection["attempt"] > 9007199254740991
+    ):
+        fail("selection_required")
     method = getattr(adapter.service, "get_native_result_source", None)
     if not callable(method):
         fail("unsupported_contract")
@@ -373,10 +421,30 @@ def native_perform(adapter, operation, selection, query, cancelled, deadline, ch
         attempt=selection["attempt"],
         calcjob_uuid=selection["calcjob_uuid"],
         point_id=query["point_id"],
-        binding_uuid=query["native_binding_uuid"],
+        binding_uuid=None if operation == "point-source" else query["native_binding_uuid"],
     )
     check()
-    point, source = _native_point(dto, selection, query)
+    point, source = _native_point(dto, selection, query, metadata=operation == "point-source")
+    retained = dict(
+        native_result=dto["native_result"],
+        native_binding=dto["native_binding"],
+        creator=point["creator"],
+        integrity=dict(readback=dto["integrity"], original_binding=dto["binding"]["integrity"]),
+    )
+    if operation == "point-source":
+        answer = dict(
+            schema="qcl-negf.portal-point-source.v1",
+            status=dto["status"],
+            scope="original_owner_metadata",
+            provider_selection=selection,
+            point={k: point[k] for k in ("point_id", "point_attempt", "plan_point_id")},
+            source={k: source[k] for k in ("kind", "relation", "reason")},
+            source_state=source["selected_state"],
+            retained=retained,
+        )
+        _bytes(answer)
+        check()
+        return answer
     binding = adapter.binding
     if binding is None:
         fail("unavailable_storage")
@@ -411,14 +479,7 @@ def native_perform(adapter, operation, selection, query, cancelled, deadline, ch
             provider="native_nfs",
             selection_mode="retained",
             source_state=source["selected_state"],
-            retained=dict(
-                native_result=dto["native_result"],
-                native_binding=dto["native_binding"],
-                creator=point["creator"],
-                integrity=dict(
-                    readback=dto["integrity"], original_binding=dto["binding"]["integrity"]
-                ),
-            ),
+            retained=retained,
             access=result["access"],
             view=result["view"],
         )

@@ -116,9 +116,10 @@ def native_case(tmp_path, monkeypatch):
             2,
             JOB,
             "point",
-            BINDING_UUID,
+            binding_uuid,
         )
-        calls.append("retained")
+        assert binding_uuid in (None, BINDING_UUID)
+        calls.append("metadata" if binding_uuid is None else "retained")
         return deepcopy(dto)
 
     mount = f"10 1 0:42 / {root} ro - nfs4 synthetic:/results ro\n"
@@ -265,3 +266,245 @@ def test_pending_actor_lease_disables_future_admission(native_case):
     assert native_case.adapter.closed
     with pytest.raises(SavedResultError, match="stopping"):
         read(native_case, "manifest")
+
+
+def test_exact_point_metadata_no_binding_and_zero_child_or_root_access(native_case, monkeypatch):
+    from qcl_negf_api import saved_nfs
+
+    c = native_case
+    calls = []
+
+    def getter(*args, **kwargs):
+        calls.append((args, kwargs))
+        assert kwargs["binding_uuid"] is None
+        return deepcopy(c.dto)
+
+    c.adapter.service.get_native_result_source = getter
+    c.adapter.binding = None
+    c.adapter.worker = lambda *args: pytest.fail("metadata launched data reader")
+    monkeypatch.setattr(saved_nfs, "_mountinfo", lambda: pytest.fail("metadata read mountinfo"))
+    monkeypatch.setattr(
+        saved_nfs.tempfile,
+        "TemporaryDirectory",
+        lambda **kw: pytest.fail("metadata allocated spool"),
+    )
+
+    async def run():
+        return await c.adapter.read("point-source", c.selection, {"point_id": "point"})
+
+    result = asyncio.run(run())
+    assert len(calls) == 1
+    assert result["schema"] == "qcl-negf.portal-point-source.v1"
+    assert result["provider_selection"] == c.selection
+    assert result["source_state"] == c.state
+    assert result["retained"]["native_binding"] == c.dto["native_binding"]
+    assert result["scope"] == "original_owner_metadata"
+    assert not set(result) & {"access", "binding", "result_utf8", "artifact_root"}
+
+
+def metadata_read(case):
+    async def run():
+        return await case.adapter.read("point-source", case.selection, {"point_id": "point"})
+
+    return asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["absent", "checkpoint", "final", "retained"])
+def test_metadata_source_variants_keep_original_state_creator_and_reason(native_case, kind):
+    c = native_case
+    if kind == "absent":
+        c.source.update(
+            kind="absent",
+            relation=None,
+            selected_state=None,
+            observations=None,
+            diagnostics=None,
+            reason="not_recorded",
+        )
+        c.dto["point"].update(creator=None, source_invocation=None)
+    elif kind == "checkpoint":
+        c.source.update(
+            kind="checkpoint", observations=None, diagnostics=None, reason="interrupted"
+        )
+    elif kind == "retained":
+        c.source.update(relation="retained_source", reason="failed_new_attempt")
+        c.dto["point"]["creator"] = dict(
+            calcjob_uuid="55555555-5555-4555-8555-555555555555",
+            binding_uuid="77777777-7777-4777-8777-777777777777",
+        )
+    c.adapter.worker = lambda *args: pytest.fail("metadata opened reader")
+    value = metadata_read(c)
+    assert c.calls == ["metadata"] and value["status"] == "available"
+    assert value["source"] == {k: c.source[k] for k in ("kind", "relation", "reason")}
+    assert value["source_state"] == c.source["selected_state"]
+    assert value["retained"]["creator"] == c.dto["point"]["creator"]
+    assert value["retained"]["integrity"]["readback"]["native_contexts"] == "not_reverified"
+    assert value["retained"]["integrity"]["original_binding"]["native_contexts"] == "verified"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "selection",
+        "point",
+        "ambiguous",
+        "plan_point",
+        "attempt",
+        "pin_count",
+        "pin_extra",
+        "creator",
+        "source_state",
+        "source_path",
+        "nonfinite",
+        "oversize",
+    ],
+)
+def test_metadata_rejects_foreign_malformed_and_unbounded_owner_dto(native_case, change):
+    c = native_case
+    if change == "selection":
+        c.dto["binding"]["selection"] = {**c.selection, "run_uuid": JOB}
+    elif change == "point":
+        c.dto["point"]["point_id"] = "foreign"
+    elif change == "ambiguous":
+        c.dto["binding"]["points"].append(deepcopy(c.dto["point"]))
+    elif change == "plan_point":
+        c.dto["point"]["plan_point_id"] = "foreign"
+    elif change == "attempt":
+        c.dto["point"]["point_attempt"] = 9007199254740992
+    elif change == "pin_count":
+        c.dto["native_binding"]["bytes"] = "18446744073709551616"
+    elif change == "pin_extra":
+        c.dto["native_binding"]["private"] = "/private"
+    elif change == "creator":
+        c.dto["point"]["creator"]["extra"] = "untrusted"
+    elif change == "source_state":
+        c.state["identity"]["execution_id"] = "foreign"
+    elif change == "source_path":
+        c.state["manifest"]["path"] = "/private/manifest.json"
+    elif change == "nonfinite":
+        c.dto["point"]["coordinates"] = {"V": float("nan")}
+    else:
+        c.dto["result_utf8"] = "x" * (2 * 1024 * 1024)
+    c.adapter.worker = lambda *args: pytest.fail("metadata opened reader")
+    with pytest.raises(SavedResultError) as caught:
+        metadata_read(c)
+    if change == "oversize":
+        assert caught.value.code == "budget_exceeded"
+
+
+@pytest.mark.parametrize("stop", ["cancel", "disconnect", "deadline"])
+def test_metadata_cancel_keeps_actual_pending_getter_and_quarantines(
+    native_case, monkeypatch, stop
+):
+    entered, release = threading.Event(), threading.Event()
+
+    def getter(*args, **kwargs):
+        assert kwargs["binding_uuid"] is None
+        entered.set()
+        release.wait(2)
+        return deepcopy(native_case.dto)
+
+    native_case.adapter.service.get_native_result_source = getter
+    native_case.adapter.cleanup_seconds = 0.02
+    if stop == "deadline":
+        monkeypatch.setattr("qcl_negf_api.saved_results.WALL", 0.05)
+
+    async def disconnected():
+        return stop == "disconnect" and entered.is_set()
+
+    async def run():
+        task = asyncio.create_task(
+            native_case.adapter.read(
+                "point-source", native_case.selection, {"point_id": "point"}, disconnected
+            )
+        )
+        for _ in range(100):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert entered.is_set()
+        with pytest.raises(SavedResultError, match="busy"):
+            await native_case.adapter.read(
+                "point-source", native_case.selection, {"point_id": "point"}
+            )
+        if stop == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(
+                SavedResultError,
+                match="unavailable_storage" if stop == "disconnect" else "budget_exceeded",
+            ):
+                await task
+        assert native_case.adapter.closed and native_case.adapter.busy
+        with pytest.raises(SavedResultError, match="stopping"):
+            await native_case.adapter.read(
+                "point-source", native_case.selection, {"point_id": "point"}
+            )
+        release.set()
+        for _ in range(100):
+            if native_case.adapter.active is None:
+                break
+            await asyncio.sleep(0.005)
+        assert native_case.adapter.active is None and native_case.adapter.closed
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+
+
+def test_metadata_refresh_uses_actual_actor_owner_thread_with_none_expectation(
+    native_case, monkeypatch
+):
+    from pathlib import Path
+
+    import aiida
+    import aiida.manage
+    import aiida_qcl_negf.service as owner
+    from qcl_negf_api.service import AiidaService
+
+    assert (
+        Path(owner.__file__).resolve()
+        == Path(__file__).resolve().parents[2] / "p07-b-credit-aiida/src/aiida_qcl_negf/service.py"
+    )
+    events = []
+    monkeypatch.setattr(
+        aiida, "load_profile", lambda profile: events.append(("load", threading.get_ident()))
+    )
+    monkeypatch.setattr(
+        aiida.manage,
+        "get_manager",
+        lambda: SimpleNamespace(
+            unload_profile=lambda: events.append(("unload", threading.get_ident()))
+        ),
+    )
+
+    def getter(run, execution, **kwargs):
+        assert (run, execution) == (RUN, "exec")
+        assert kwargs == dict(attempt=2, calcjob_uuid=JOB, point_id="point", binding_uuid=None)
+        events.append(("getter", threading.get_ident()))
+        return deepcopy(native_case.dto)
+
+    monkeypatch.setattr(owner, "get_native_result_source", getter)
+    actor = AiidaService("synthetic-P10")
+    native_case.adapter.service = actor
+    native_case.adapter.binding = None
+    try:
+        assert metadata_read(native_case)["source_state"] == native_case.state
+    finally:
+        actor.close()
+    assert [e[0] for e in events] == ["load", "getter", "unload"]
+    assert len({e[1] for e in events}) == 1 and events[0][1] != threading.get_ident()
+
+
+@pytest.mark.parametrize("kind", [LookupError, ValueError])
+def test_metadata_owner_failure_never_becomes_available_absent(native_case, kind):
+    def getter(*args, **kwargs):
+        raise kind("private owner detail")
+
+    native_case.adapter.service.get_native_result_source = getter
+    with pytest.raises(SavedResultError, match="unavailable_storage") as caught:
+        metadata_read(native_case)
+    assert "private" not in str(caught.value)

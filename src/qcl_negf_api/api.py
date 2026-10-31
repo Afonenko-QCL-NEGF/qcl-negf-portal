@@ -895,6 +895,30 @@ def create_app(settings: Settings | None = None, service: Any = None,
                 "reason": "Saved result is unavailable for this exact selection"}},
                 status_code=status, headers={"Cache-Control": "no-store"})
 
+    @app.get("/api/v1/runs/{run_uuid}/saved-results/point-source", dependencies=protected)
+    async def saved_point_source(
+        request: Request,
+        run_uuid: UUID,
+        execution_id: str = Query(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"),
+        attempt: int = Query(..., ge=1, le=9007199254740991),
+        calcjob_uuid: UUID = Query(...),
+        point_id: str = Query(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"),
+    ):
+        allowed = {"execution_id", "attempt", "calcjob_uuid", "point_id"}
+        if (
+            set(request.query_params) != allowed
+            or len(request.query_params.multi_items()) != len(allowed)
+            or await request.body()
+        ):
+            raise HTTPException(422, "Only exact point metadata selectors are supported")
+        return await saved_call(
+            request,
+            run_uuid,
+            "point-source",
+            dict(execution_id=execution_id, attempt=attempt, calcjob_uuid=str(calcjob_uuid)),
+            dict(point_id=point_id),
+        )
+
     @app.get("/api/v1/runs/{run_uuid}/saved-results/sources", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/brief", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/manifest", dependencies=protected)

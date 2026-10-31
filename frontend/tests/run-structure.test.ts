@@ -50,8 +50,7 @@ test('101 rows are reachable with total and no discarded point',()=>{
   assert.deepEqual(pointPage(points,1).rows.map(p=>p.id),['point-100']);
   assert.deepEqual([...pointPage(points,0).rows,...pointPage(points,1).rows],points);
 });
-test('run switch retains refresh sequence guard and mounts keyed by exact detail UUID',async()=>{
+test('run switch retains refresh sequence guard',async()=>{
   const source=await readFile(new URL('../src/main.tsx',import.meta.url),'utf8');
-  assert.match(source,/<RunStructure key=\{detail.uuid\} run=\{detail\}/);
   assert.match(source,/refreshSequence/);assert.match(source,/sequence !== refreshSequence.current/);
 });

@@ -2,10 +2,10 @@ import {useEffect,useRef,useState} from 'react';
 import {SavedDiagnostics} from './saved-diagnostics.tsx';
 import {api,errorMessage} from './api';
 import type {Run} from './api';
-import {cellEdges,displayScale,readManifest,readSlice,nativePin,SavedSession,selectionOptions} from './saved-results-data';
-import type {Masks,Numbers,SavedAxis,SavedSlice,SavedView,NativeContext,NativeEnvelope,SavedManifest} from './saved-results-data';
+import {cellEdges,displayScale,readManifest,readSlice,nativePin,SavedSession,selectionOptions,pointChoice,pointRequest,readPointSource,pointContext} from './saved-results-data';
+import type {Masks,Numbers,SavedAxis,SavedSlice,SavedView,PointSource,NativeEnvelope,SavedManifest} from './saved-results-data';
 
-const show=(v:unknown)=>v==null?'unknown':typeof v==='object'?JSON.stringify(v):typeof v==='number'&&Object.is(v,-0)?'-0':String(v);
+const show=(v:unknown,precision?:number)=>v==null?'unknown':typeof v==='object'?JSON.stringify(v):typeof v==='number'?(Object.is(v,-0)?'-0':precision?v.toPrecision(precision):String(v)):String(v);
 const number=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v);
 const colors=['#165da8','#b52c38','#25733d','#7952a2','#a45c00','#007b82','#733b3b','#576722','#a42477','#315b68','#6c4d99','#634c12'];
 function GraphUnavailable(){return <p role="status">Graph unavailable: saved finite coordinates have no representable display geometry. Inspect the unchanged native value table.</p>;}
@@ -20,8 +20,8 @@ function Lines({paths,xlabel,ylabel,markersOnly=false,groups,labels,uncertain}:{
  const xmin=xs.minimum,xmax=xs.maximum,ymin=ys.minimum,ymax=ys.maximum;
  return <svg className="saved-plot" viewBox="0 0 680 300" role="img" aria-label={`${ylabel} versus ${xlabel}`}>
   <path d="M52 32V252H632" fill="none" stroke="#536477"/>
-  <text x="52" y="275">{xmin.toPrecision(5)}</text><text x="565" y="275">{xmax.toPrecision(5)}</text>
-  <text x="4" y="40">{ymax.toPrecision(4)}</text><text x="4" y="250">{ymin.toPrecision(4)}</text>
+  <text x="52" y="275">{show(xmin,5)}</text><text x="565" y="275">{show(xmax,5)}</text>
+  <text x="4" y="40">{show(ymax,4)}</text><text x="4" y="250">{show(ymin,4)}</text>
   <text x="300" y="295">{xlabel}</text><text x="60" y="20">{ylabel}</text>
   {paths.map((path,i)=><g key={i} stroke={colors[(groups?.[i]??i)%colors.length]} fill={colors[(groups?.[i]??i)%colors.length]}>
    <title>{labels?.[i]??(uncertain?.[i]?'unaccepted or unknown saved marker':'saved segment')}</title>
@@ -103,52 +103,63 @@ export function SavedPlot({slice}:{slice:SavedSlice}){
 }
 function nativeSelection(view:SavedView,fields:Record<string,string>):(number|{start:number;stop:number;step:number})[]{
  return Array.from({length:view.allowed_selection!.axis_count},(_,i)=>{
-  const integer=(key:string)=>{const raw=fields[`${i}:${key}`]??'';if(!/^(0|[1-9][0-9]*)$/.test(raw))throw new Error('Enter explicit nonnegative native indices/ranges');const n=Number(raw);if(!Number.isSafeInteger(n))throw new Error('Index exceeds finite bound');return n;};
+  const integer=(key:string)=>{const raw=fields[`${i}:${key}`]??'';if(!/^(0|[1-9][0-9]*)$/.test(raw))throw new Error('Укажите точные неотрицательные индексы или диапазоны');const n=Number(raw);if(!Number.isSafeInteger(n))throw new Error('Индекс превышает точный числовой предел');return n;};
   if(fields[`${i}:mode`]==='index')return integer('index');
-  const start=integer('start'),stop=integer('stop'),step=integer('step');if(stop<=start||step<1)throw new Error('Require stop > start and step > 0');return {start,stop,step};
+  const start=integer('start'),stop=integer('stop'),step=integer('step');if(stop<=start||step<1)throw new Error('Конец должен быть больше начала, шаг — положительным');return {start,stop,step};
  });
 }
+export function PointSourceSummary({source}:{source:PointSource}){return <><p>Получены метаданные исходного владельца. Доступ к файлам пока не проверен; научная приёмка не установлена.</p>
+ {source.source.kind==='absent'?<p>Источник отсутствует: {source.source.reason}</p>:<p>{source.source.kind==='checkpoint'?'Сохранён checkpoint; финальные карты не объявлены.':'Объявлено финальное состояние; доступность чтения проверится при запросе.'} {source.source.relation==='retained_source'&&'Сохранённый источник другой попытки.'} {source.source.reason}</p>}
+ <details><summary>Исходные идентификаторы и область проверки</summary><pre>{JSON.stringify(source,null,2)}</pre></details></>;}
 export function SavedResultsPanel({token,run}:{token:string;run:Run}){
  const options=selectionOptions(run),session=useRef(new SavedSession()),identity=useRef('');
- const [choice,setChoice]=useState(''),[pointId,setPointId]=useState(''),[binding,setBinding]=useState(''),[manifestSHA,setManifestSHA]=useState('');
- const [stored,setStored]=useState<{key:string;value:NativeEnvelope<SavedManifest>}|null>(null),[slice,setSlice]=useState<{key:string;value:SavedSlice}|null>(null);
- const [viewId,setViewId]=useState(''),[fields,setFields]=useState<Record<string,string>>({}),[error,setError]=useState(''),[busy,setBusy]=useState(''),[diagnostics,setDiagnostics]=useState(false);
- const selection=options.find(v=>v.calcjob_uuid===choice),points=(run.plan_points??[]).filter(p=>p.execution_id===selection?.execution_id);
- const point=points.find(p=>p.id===pointId),key=JSON.stringify([token,run.uuid,choice,pointId,binding,manifestSHA]);
+ const [choice,setChoice]=useState(''),[pointId,setPointId]=useState(''),[generation,setGeneration]=useState(0);
+ const selected=pointChoice(token,run,choice,pointId),{selection,point,key}=selected,contextKey=JSON.stringify([key,generation]);
  if(identity.current!==key){session.current.invalidate();identity.current=key;}
- const manifest=stored?.key===key?stored.value:null,shown=slice?.key===key?slice.value:null,view=manifest?.view.views[viewId];
- const context:NativeContext|undefined=selection&&point?{selection,point_id:pointId,native_binding_uuid:binding,state_manifest_sha256:manifestSHA,...(manifest?{state_ref:manifest.source_state}:{})}:undefined;
- function invalidate(){session.current.invalidate();setSlice(null);setError('');setBusy('');}
- function reset(){invalidate();setStored(null);setViewId('');setFields({});setDiagnostics(false);}
+ const [metadata,setMetadata]=useState<{key:string;value:PointSource}|null>(null),[stored,setStored]=useState<{key:string;value:NativeEnvelope<SavedManifest>}|null>(null),[slice,setSlice]=useState<{key:string;value:SavedSlice}|null>(null);
+ const [viewId,setViewId]=useState(''),[fields,setFields]=useState<Record<string,string>>({}),[error,setError]=useState<{key:string;text:string}|null>(null),[busy,setBusy]=useState(''),[diagnostics,setDiagnostics]=useState(false);
+ const source=metadata?.key===contextKey?metadata.value:null,context=source?pointContext(source):null;
+ const manifest=source&&stored?.key===contextKey?stored.value:null,shown=source&&slice?.key===contextKey?slice.value:null,view=manifest?.view.views[viewId];
+ const points=(run.plan_points??[]).filter(p=>p.execution_id===selection?.execution_id);
+ function invalidate(){session.current.invalidate();setSlice(null);setError(null);setBusy('');}
+ function reset(){invalidate();setMetadata(null);setStored(null);setViewId('');setFields({});setDiagnostics(false);}
  useEffect(()=>{reset();return()=>session.current.invalidate();},[key]);
- async function load(operation:'manifest'|'slice'){
-  if(!context)return;const selected=context,g=session.current.begin();setBusy(key);setError('');
+ async function refresh(){
+  if(!selection||!point)return;
+  reset();const g=session.current.begin(),nextKey=JSON.stringify([key,g]);setGeneration(g);setBusy(nextKey);
+  const exact=selection,exactPoint=point.id;
   await session.current.receive(g,async()=>{
-   const pin=nativePin(selected),base=`/runs/${encodeURIComponent(run.uuid)}/saved-results/`;
-   if(operation==='manifest'){const query=new URLSearchParams(Object.entries(pin).map(([k,v])=>[k,String(v)]));return readManifest(await api(token,base+'manifest?'+query),selected);}
-   if(!manifest||!view)throw new Error('Select an available native view');
-   return readSlice(await api(token,base+'slice',{...pin,source_state:manifest.source_state,view_id:viewId,selection:nativeSelection(view,fields)}),selected,viewId);
-  },value=>{if(operation==='manifest'){setStored({key,value:value as NativeEnvelope<SavedManifest>});setSlice(null);setViewId('');setFields({});}else setSlice({key,value:(value as NativeEnvelope).view as unknown as SavedSlice});setBusy('');},e=>{setError(errorMessage(e));setBusy('');});
+   const query=new URLSearchParams(Object.entries(pointRequest(exact,exactPoint)).map(([k,v])=>[k,String(v)]));
+   return readPointSource(await api(token,`/runs/${encodeURIComponent(run.uuid)}/saved-results/point-source?${query}`),exact,exactPoint);
+  },value=>{setMetadata({key:nextKey,value:value as PointSource});setBusy('');},e=>{setError({key:nextKey,text:errorMessage(e)});setBusy('');});
  }
- return <section className="saved-results"><h3>Сохранённый транспорт native5</h3>
- <p>Explicit retained point: run → execution / transport attempt / CalcJob → original binding UUID → exact manifest SHA. Native attempt and AiiDA attempt are separate identities. No solver or derive starts.</p>
- <p>Execution-wide brief/catalog (R1), current history (R3), retrieved payload (R4) and performance producer (R5) remain unavailable pending their owning contracts.</p>
- <label>Execution / attempt / exact CalcJob<select value={choice} onChange={e=>{reset();setChoice(e.target.value);setPointId('');setBinding('');setManifestSHA('');}}><option value="">Select explicitly</option>{options.map(v=><option key={v.calcjob_uuid} value={v.calcjob_uuid}>{v.execution_id} · attempt {v.attempt} · {v.calcjob_uuid}</option>)}</select></label>
- <label>Exact frozen point<select value={pointId} onChange={e=>{reset();setPointId(e.target.value);setBinding('');setManifestSHA('');}}><option value="">Select point explicitly</option>{points.map(p=><option key={p.id} value={p.id}>{p.id} · {p.temperature_K} K · {p.voltage_per_period_V} V</option>)}</select></label>
- {!points.length&&<p>Exact frozen point inventory unavailable for this execution.</p>}
- <label>Original native binding UUID<input value={binding} onChange={e=>{reset();setBinding(e.target.value);}}/></label>
- <label>Selected native manifest SHA-256<input value={manifestSHA} onChange={e=>{reset();setManifestSHA(e.target.value);}}/></label>
- <p>Copy exact retained pins from the owning provenance record. Input claims grant no filesystem access; the owner rechecks them. No first/latest binding is inferred.</p>
- <button type="button" disabled={!context||busy===key||!binding||!manifestSHA} onClick={()=>void load('manifest')}>Describe exact retained views</button>
- <button type="button" disabled={!context||busy===key||!binding||!manifestSHA} onClick={()=>setDiagnostics(true)}>Сохранённая диагностика (checkpoint/history, без final view)</button>
- {error&&<p role="alert" className="error">{error}</p>}{busy===key&&<p role="status">Reading bounded retained selection…</p>}
- {diagnostics&&context&&<SavedDiagnostics key={key} token={token} context={context}/>}
- {manifest&&<><p>Readback integrity: native contexts not reverified; science not assessed. Original binding integrity: historical selected metadata verified; current access not checked. RO access is a separate current-request observation.</p><details><summary>Exact native state, original provenance, current request access and raw assessments</summary><pre>{JSON.stringify(manifest,null,2)}</pre></details>
- <label>Saved semantic view<select value={viewId} onChange={e=>{invalidate();setViewId(e.target.value);setFields({});}}><option value="">Select a view</option>{Object.values(manifest.view.views).map(v=><option key={v.view_id} value={v.view_id} disabled={v.availability!=='available'}>{v.view_id} · {v.units} · {v.availability} {v.issue?JSON.stringify(v.issue):''}</option>)}</select></label></>}
- {view?.availability==='available'&&<><p>Native shape {view.shape?.join(' × ')}; {view.basis??'no basis'}; {view.units}. Explicit native indices/ranges only.</p>
- {Array.from({length:view.allowed_selection!.axis_count},(_,i)=><fieldset key={`${viewId}:${i}`}><legend>{view.axes?.[i]} native axis</legend>
- <select aria-label={`Axis ${i} selection mode`} value={fields[`${i}:mode`]??'range'} onChange={e=>{invalidate();setFields(f=>({...f,[`${i}:mode`]:e.target.value}));}}><option value="range">Explicit range</option><option value="index">Explicit index</option></select>
- {(fields[`${i}:mode`]==='index'?['index']:['start','stop','step']).map(k=><label key={k}>{k}{k==='stop'?' (exclusive)':''}<input value={fields[`${i}:${k}`]??''} onChange={e=>{invalidate();setFields(f=>({...f,[`${i}:${k}`]:e.target.value}));}}/></label>)}</fieldset>)}
- <button type="button" disabled={busy===key} onClick={()=>void load('slice')}>Read exact native selection</button></>}
+ async function load(operation:'manifest'|'slice'){
+  if(!context)return;const exact=context,g=session.current.begin();setBusy(contextKey);setError(null);
+  await session.current.receive(g,async()=>{
+   const pin=nativePin(exact),base=`/runs/${encodeURIComponent(run.uuid)}/saved-results/`;
+   if(operation==='manifest'){const query=new URLSearchParams(Object.entries(pin).map(([k,v])=>[k,String(v)]));return readManifest(await api(token,base+'manifest?'+query),exact);}
+   if(!manifest||!view)throw new Error('Выберите доступное сохранённое представление');
+   return readSlice(await api(token,base+'slice',{...pin,source_state:exact.state_ref,view_id:viewId,selection:nativeSelection(view,fields)}),exact,viewId);
+  },value=>{if(operation==='manifest'){setStored({key:contextKey,value:value as NativeEnvelope<SavedManifest>});setSlice(null);setViewId('');setFields({});}else setSlice({key:contextKey,value:(value as NativeEnvelope).view as unknown as SavedSlice});setBusy('');},e=>{setError({key:contextKey,text:errorMessage(e)});setBusy('');});
+ }
+ return <section className="saved-results"><h3>Сохранённые результаты точки</h3>
+ <p>Выберите исполнение, транспортную попытку, CalcJob и точку исходного плана. Затем явно обновите сведения источника. Номер native-попытки хранится отдельно; чтение не запускает расчёт или derive.</p>
+ <p>Каталог всех точек/J(V) (R1), текущая история (R3), retrieved (R4) и performance (R5) ожидают отдельных контрактов производителей.</p>
+ <label>Исполнение / попытка / CalcJob<select value={choice} onChange={e=>{reset();setChoice(e.target.value);setPointId('');}}><option value="">Выберите явно</option>{options.map(v=><option key={v.calcjob_uuid} value={v.calcjob_uuid}>{v.execution_id} · попытка {v.attempt} · {v.calcjob_uuid}</option>)}</select></label>
+ <label>Точка исходного плана<select value={pointId} onChange={e=>{reset();setPointId(e.target.value);}}><option value="">Выберите точку</option>{points.map(p=><option key={p.id} value={p.id}>{p.id} · {show(p.temperature_K)} K · {show(p.voltage_per_period_V)} V</option>)}</select></label>
+ {!points.length&&<p>Список точек исходного плана для этого исполнения недоступен.</p>}
+ <button type="button" disabled={!selection||!point||busy===contextKey} onClick={()=>void refresh()}>Обновить сведения выбранной точки</button>
+ {busy===contextKey&&<p role="status">Чтение выбранных сохранённых сведений…</p>}{error?.key===contextKey&&<p role="alert" className="error">{error.text}</p>}
+ {source&&<PointSourceSummary source={source}/>}
+ {context&&<><button type="button" disabled={source?.source.kind!=='final'||busy===contextKey} onClick={()=>void load('manifest')}>Прочитать описание сохранённых представлений</button>
+ <button type="button" disabled={busy===contextKey} onClick={()=>setDiagnostics(true)}>Открыть сохранённую диагностику и историю</button></>}
+ {diagnostics&&context&&<SavedDiagnostics key={contextKey} token={token} context={context}/>}
+ {manifest&&<><p>Текущее чтение не перепроверяет native-контексты и научную приёмку. Историческая binding проверяет выбранные метаданные. Наблюдение RO-доступа относится только к этому запросу.</p><details><summary>Исходное состояние, provenance и наблюдение доступа</summary><pre>{JSON.stringify(manifest,null,2)}</pre></details>
+ <label>Сохранённое представление<select value={viewId} onChange={e=>{invalidate();setViewId(e.target.value);setFields({});}}><option value="">Выберите представление</option>{Object.values(manifest.view.views).map(v=><option key={v.view_id} value={v.view_id} disabled={v.availability!=='available'}>{v.view_id} · {v.units} · {v.availability==='available'?'доступно':'недоступно'} {v.issue?JSON.stringify(v.issue):''}</option>)}</select></label></>}
+ {view?.availability==='available'&&<><p>Исходный размер {view.shape?.join(' × ')}; базис {view.basis??'не указан'}; {view.units}. Задайте точные индексы или диапазоны.</p>
+ {Array.from({length:view.allowed_selection!.axis_count},(_,i)=><fieldset key={`${viewId}:${i}`}><legend>{view.axes?.[i]}: исходная ось</legend>
+ <select aria-label={`Ось ${i}: режим выборки`} value={fields[`${i}:mode`]??'range'} onChange={e=>{invalidate();setFields(f=>({...f,[`${i}:mode`]:e.target.value}));}}><option value="range">Диапазон</option><option value="index">Индекс</option></select>
+ {(fields[`${i}:mode`]==='index'?['index']:['start','stop','step']).map(k=><label key={k}>{({index:'Индекс',start:'Начало',stop:'Конец (не включается)',step:'Шаг'} as Record<string,string>)[k]}<input value={fields[`${i}:${k}`]??''} onChange={e=>{invalidate();setFields(f=>({...f,[`${i}:${k}`]:e.target.value}));}}/></label>)}</fieldset>)}
+ <button type="button" disabled={busy===contextKey} onClick={()=>void load('slice')}>Прочитать точную выборку</button></>}
  {shown&&<SavedPlot slice={shown}/>}</section>;
 }

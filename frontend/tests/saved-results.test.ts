@@ -31,3 +31,64 @@ test('historical failed children remain explicit and display geometry preserves 
 });
 
 test('readback and historical binding integrity retain distinct unequal scopes',()=>{const {response,context}=nativeFixture();const value=readNativeEnvelope(response,context,'manifest');assert.equal(value.retained.integrity.readback.native_contexts,'not_reverified');assert.equal(value.retained.integrity.original_binding.native_contexts,'verified');for(const integrity of [{...response.retained.integrity,readback:response.retained.integrity.original_binding},{...response.retained.integrity,original_binding:null},{...response.retained.integrity,readback:{...response.retained.integrity.readback,current_access:'verified'}}])assert.throws(()=>readNativeEnvelope({...response,retained:{...response.retained,integrity}},context,'manifest'));});
+
+export function pointFixture(){const f=nativeFixture();return {...f,metadata:{schema:'qcl-negf.portal-point-source.v1',status:'available',scope:'original_owner_metadata',provider_selection:f.selection,point:{point_id:'point',point_attempt:2,plan_point_id:'point'},source:{kind:'final',relation:'current_point_attempt',reason:null},source_state:f.state,retained:{...f.response.retained,creator:{calcjob_uuid:f.selection.calcjob_uuid,binding_uuid:null}}}};}
+test('point metadata obtains original full context without manual pins',async()=>{
+ const data=await import('../src/saved-results-data.ts');const f=pointFixture();
+ const value=data.readPointSource(f.metadata,f.selection,'point');const context=data.pointContext(value)!;
+ assert.deepEqual(context,{...f.context,state_ref:f.state});
+ assert.deepEqual(data.pointRequest(f.selection,'point'),{execution_id:'exec',attempt:2,calcjob_uuid:f.selection.calcjob_uuid,point_id:'point'});
+ assert.throws(()=>readManifest({...f.response,source_state:{...f.state,state_id:'different'}},context));
+});
+
+test('strict point projection distinguishes absent, checkpoint and retained original creator',async()=>{
+ const data=await import('../src/saved-results-data.ts');const f=pointFixture();
+ const absent={...f.metadata,source:{kind:'absent',relation:null,reason:'not_recorded'},source_state:null,retained:{...f.metadata.retained,creator:null}};
+ assert.equal(data.pointContext(data.readPointSource(absent,f.selection,'point')),null);
+ const checkpoint={...f.metadata,source:{kind:'checkpoint',relation:'current_point_attempt',reason:'interrupted'}};
+ assert.equal(data.readPointSource(checkpoint,f.selection,'point').source.kind,'checkpoint');
+ const retained={...f.metadata,source:{kind:'final',relation:'retained_source',reason:'failed_new_attempt'},retained:{...f.metadata.retained,creator:{calcjob_uuid:'55555555-5555-4555-8555-555555555555',binding_uuid:'77777777-7777-4777-8777-777777777777'}}};
+ assert.deepEqual(data.readPointSource(retained,f.selection,'point').retained.creator,retained.retained.creator);
+ for(const bad of [{...f.metadata,access:{}},{...f.metadata,scope:'current_ro'},
+  {...f.metadata,provider_selection:{...f.selection,run_uuid:f.selection.calcjob_uuid}},
+  {...f.metadata,point:{...f.metadata.point,plan_point_id:'foreign'}},
+  {...f.metadata,point:{...f.metadata.point,point_attempt:9007199254740992}},
+  {...f.metadata,point:{...f.metadata.point,point_attempt:true}},
+  {...f.metadata,source:{...f.metadata.source,artifact_root:'/private'}},
+  {...f.metadata,source:{kind:'final',relation:'current_point_attempt',reason:'guessed'}},
+  {...absent,source_state:f.state},
+  {...f.metadata,source_state:{...f.state,state_sequence:'0'}},
+  {...f.metadata,source_state:{...f.state,manifest:{...f.state.manifest,path:'/private'}}},
+  {...f.metadata,source_state:{...f.state,manifest:{...f.state.manifest,bytes:'18446744073709551616'}}},
+  {...f.metadata,retained:{...f.metadata.retained,creator:null}},
+  {...f.metadata,retained:{...f.metadata.retained,native_binding:{...f.pin,extra:'untrusted'}}},
+  {...f.metadata,retained:{...f.metadata.retained,integrity:{...f.metadata.retained.integrity,readback:f.metadata.retained.integrity.original_binding}}},
+  {...f.metadata,retained:{...f.metadata.retained,creator:{calcjob_uuid:'55555555-5555-4555-8555-555555555555',binding_uuid:null}}},
+ ])assert.throws(()=>data.readPointSource(bad,f.selection,'point'));
+ assert.throws(()=>data.readPointSource({...f.metadata,extra:'x'.repeat(2097152)},f.selection,'point'));
+ assert.throws(()=>data.pointRequest({...f.selection,attempt:9007199254740992},'point'));
+});
+test('same-point explicit refresh rejects out-of-order success and error and old full StateRef',async()=>{
+ const data=await import('../src/saved-results-data.ts');const f=pointFixture(),session=new SavedSession();let applied='new',late!:(v:unknown)=>void;
+ const old=session.receive(session.begin(),()=>new Promise(r=>late=r),()=>applied='old success',()=>applied='old error');
+ const fresh=session.begin();late(f.metadata);await old;assert.equal(applied,'new');assert.ok(session.current(fresh));
+ let reject!:(e:unknown)=>void;const error=session.receive(session.begin(),()=>new Promise((_,r)=>reject=r),()=>applied='old success',()=>applied='old error');session.begin();reject(new Error('old'));await error;assert.equal(applied,'new');
+ const renewed=data.readPointSource({...f.metadata,source_state:{...f.state,state_id:'new',manifest:{...f.state.manifest,sha256:'f'.repeat(64)}}},f.selection,'point');
+ assert.throws(()=>readManifest(f.response,data.pointContext(renewed)!));
+});
+test('selected tuple and frozen point membership invalidates key without poll mtime churn',async()=>{
+ const {pointChoice}=await import('../src/saved-results-data.ts');const f=pointFixture();
+ const run={uuid:f.selection.run_uuid,children:[{uuid:f.selection.calcjob_uuid,execution_id:'exec',attempt:2}],plan_points:[{id:'point',execution_id:'exec',temperature_K:300,voltage_per_period_V:0}]};
+ const a=pointChoice('token',run as never,f.selection.calcjob_uuid,'point');assert.ok(a.selection&&a.point);
+ assert.equal(a.key,pointChoice('token',{...run,mtime:'later'} as never,f.selection.calcjob_uuid,'point').key);
+ for(const next of [{...run,children:[]},{...run,plan_points:[]},{...run,children:[{...run.children[0],attempt:3}]},{...run,uuid:f.selection.calcjob_uuid}])assert.notEqual(a.key,pointChoice('token',next as never,f.selection.calcjob_uuid,'point').key);
+ assert.notEqual(a.key,pointChoice('new token',run as never,f.selection.calcjob_uuid,'point').key);
+ assert.equal(pointChoice('token',{...run,plan_points:[...run.plan_points,...run.plan_points]} as never,f.selection.calcjob_uuid,'point').point,undefined);
+});
+
+test('metadata scalar spelling rejects newline aliases and malformed relative references',async()=>{
+ const data=await import('../src/saved-results-data.ts');const f=pointFixture();
+ assert.throws(()=>data.pointRequest(f.selection,'point\n'));
+ for(const pin of [{...f.pin,node_uuid:f.pin.node_uuid+'\n'},{...f.pin,sha256:f.pin.sha256+'\n'},{...f.pin,bytes:'2\n'}])assert.throws(()=>data.readPointSource({...f.metadata,retained:{...f.metadata.retained,native_binding:pin}},f.selection,'point'));
+ for(const path of ['../private','a//state.json','a/./state.json','a\\state.json',''])assert.throws(()=>data.readPointSource({...f.metadata,source_state:{...f.state,manifest:{...f.state.manifest,path}}},f.selection,'point'));
+});

@@ -104,20 +104,24 @@ The output directory for `verdi node repo dump` must not exist. Choose a differe
 
 ## Native5 retained point reader
 
-The light saved transport panel now reads an explicit native5 retained point
-through the original AiiDA binding UUID and full selected StateRef. Manifest,
-native slice and canonical history use the existing isolated child and owning
-public Results readers. Native views are dictionaries; native decimal-string
-identity/cursors and original IEEE/missing/status evidence stay separate from
-AiiDA input attempts and current access observations. See
-[saved-results.md](docs/saved-results.md) for exact selectors and lifetime rules.
-Old scientific v4 request shapes are refused. Execution-wide brief/current/
-retrieved/performance producer gates and installed/browser/scientific acceptance
-remain separate; this increment does not establish their readiness.
+На светлом экране **«Сохранённые результаты точки»** выберите исполнение,
+транспортную попытку/CalcJob и точку исходного плана, затем нажмите
+**«Обновить сведения выбранной точки»**. Новый exact-point metadata GET получает
+original binding pins и полный StateRef через существующий public AiiDA getter;
+ручной ввод UUID/SHA не требуется. Исходные identifiers и scope остаются в
+read-only details. Это metadata availability, не свидетельство current RO-доступа.
 
-Retained native5 integrity preserves distinct original binding metadata and current
-getter readback limitations; the current request RO observation is separate.
-Historical verification does not imply reverified native contexts or scientific acceptance.
+Далее существующий изолированный child и public Results readers читают manifest,
+точную slice или canonical diagnostics/history. Absent/checkpoint/final и
+retained-source reason/creator сохраняют исходный смысл. Native Identity/attempt
+не подменяются AiiDA attempt. Same-point refresh и смена tuple немедленно снимают
+старые data/cursor, запоздалые success/error отбрасываются. См.
+[saved-results.md](docs/saved-results.md) для exact route/DTO и lifetime limits.
+
+Execution-wide brief/current/retrieved/performance producers, derive/comparison,
+actual used-value help и installed/browser/native/scientific gates остаются
+отдельными OPEN задачами. Историческая binding integrity и getter readback
+limitations различаются; RO-наблюдение относится только к отдельному read request.
 
 ## HTTP API
 

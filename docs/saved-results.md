@@ -1,10 +1,49 @@
 # Native5 retained point reads
 
-The light **Сохранённый транспорт native5** panel reads an explicitly selected
-retained native point. Select the exact execution/transport attempt/CalcJob and
-frozen point, then supply its original native binding UUID and selected manifest
-SHA-256 from the owning provenance record. These are constraints, not access
-authority. There is no first/latest binding or native attempt default.
+Светлый экран **«Сохранённые результаты точки»** использует явный выбор run →
+исполнение / транспортная попытка / CalcJob → точка исходного плана. Нажмите
+**«Обновить сведения выбранной точки»**: исходные UUID/SHA и полный StateRef приходят
+из public AiiDA getter; ручной ввод pins для обычного пути не нужен.
+
+Refresh не читает NFS и не обещает, что сохранённый payload сейчас доступен.
+`absent` показывает исходную причину и отключает чтение; `checkpoint` позволяет
+явно запросить диагностику/историю без final maps; `final` позволяет запросить
+описание представлений. Наличие конкретной history/view capability устанавливает
+только Results descriptor при отдельном чтении. `retained_source` сохраняет
+исходного creator и причину, отдельно от transport CalcJob/attempt.
+
+UUID/SHA/full StateRef и обе integrity scopes доступны в read-only details
+**«Исходные идентификаторы и область проверки»**. Первого/latest source по умолчанию
+нет. Повторный refresh той же точки снимает старые сведения, карты, диагностику и
+cursor до нового ответа. Смена token/run/tuple/point или исчезновение выбранной
+tuple/point после обновления run также снимает контекст; запоздалые success/error
+не возвращают старое состояние. Обычный неизменный run poll не запускает refresh.
+
+## Точные метаданные точки
+
+`GET /api/v1/runs/{run_uuid}/saved-results/point-source` принимает ровно обязательные
+`execution_id`, positive safe integer `attempt`, полный `calcjob_uuid` и `point_id`.
+Bearer authentication и no-store обязательны. Лишние/повторные параметры, непустое
+GET body, path, binding/hash claims и некорректные selectors отвергаются (422).
+Вызов actor: `get_native_result_source(..., point_id=..., binding_uuid=None)` — один
+public owner вызов; не обход каталога R1 и не дополнительная работа на run poll.
+
+Закрытая проекция `qcl-negf.portal-point-source.v1` содержит:
+
+- `status=available`, `scope=original_owner_metadata` и exact `provider_selection`;
+- `point={point_id,point_attempt,plan_point_id}`;
+- `source={kind,relation,reason}` и полный исходный `source_state` (null только absent);
+- original `retained.native_result`, `native_binding`, nullable `creator` и отдельные
+  `integrity.readback` / `integrity.original_binding`.
+
+Это доступность **метаданных**, не current RO или научная приёмка. Binding storage,
+artifact_root, raw result/полный binding и host paths не выдаются. Неверный original
+CREATE/point/StateRef — ошибка, не искусственный absent. Полный owner DTO и ответ
+ограничены прежними 2 MiB, без усечения. Metadata доступна без local RO binding при
+включённом feature; чтение payload затем может честно отказать unavailable_storage.
+Owner accounting320MiB metadata/256MiB I/O не означает маленькую цену refresh или
+измеренный RSS. Сохраняются одна actual future, WALL10s, actor timeout30s и cleanup
+gate/quarantine; прекращение HTTP-ожидания не доказывает завершение actor getter.
 
 The original AiiDA getter is
 `get_native_result_source(run_uuid, execution_id, *, attempt, calcjob_uuid,
@@ -22,7 +61,7 @@ canonical decimal strings.
 
 ## Existing authenticated routes
 
-All routes require bearer authentication and use no-store. Retained metadata GETs
+All routes require bearer authentication and use no-store. The payload-reader metadata GETs
 accept exactly `execution_id`, positive `attempt`, `calcjob_uuid`,
 `provider=native_nfs`, `point_id`, `native_binding_uuid`,
 `state_manifest_sha256`. Unknown or duplicate selectors are refused.
@@ -45,7 +84,8 @@ retained node pins/creator and two distinct integrity projections:
 not assessed, current access not checked). Neither scope upgrades the other.
 A separate request-local `access` observation,
 and the unmodified owning `view`. Native `views` is a dictionary. State echoes
-are compared in full, not only by hash. Old commit/index/phase row-range request
+are compared in full against the metadata StateRef, not only by hash. A refreshed
+context never rebases an earlier history cursor. Old commit/index/phase row-range request
 shapes are refused, with no scientific v4 adapter.
 
 The child uses public `StateReader`, exact final-observations FileRef and

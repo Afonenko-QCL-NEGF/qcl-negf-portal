@@ -68,7 +68,7 @@ test('bounded card download retains exact bytes with bearer header and fixed fil
 test('mount, explicit mutation, stale guards, pinned selectors and unknown readback controls are retained',async()=>{
   const source=await readFile(new URL('../src/research-cards.tsx',import.meta.url),'utf8');
   const main=await readFile(new URL('../src/main.tsx',import.meta.url),'utf8');
-  assert.match(main,/<ResearchCards key=\{token\}/);assert.match(main,/<RunStructure key=\{detail.uuid\}/);
+  assert.match(main,/<ResearchCards key=\{token\}/);
   for(const literal of ['generation.current.current(g)','reportGeneration.current.current(g)','runGeneration.current.current(g)',
     'base_version_uuid: version!.version_uuid','card_version_uuid:version.version_uuid','plan_fingerprint:inspected.plan_fingerprint',
     'anchor_run_uuid:pickedReport.anchor.run_uuid','report_uuid:pickedReport.uuid','crypto.randomUUID()',

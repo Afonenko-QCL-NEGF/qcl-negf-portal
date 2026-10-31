@@ -13,3 +13,9 @@ test('native descriptor preserves failed/unknown separate axes and exact counts 
  const data={closed:false,status:{process:{state:'failed'},physics:{state:'not_measured'},experimental:{state:'not_measured'}},history:{records:'9007199254740993'},resources:{performance_summary:{status:'not_available',reason:'not_recorded_in_result_v2'}},io_counters:{}};
  const html=renderToStaticMarkup(createElement(ui.DiagnosticSummary,{data}));for(const text of ['failed','not_measured','9007199254740993','not_recorded_in_result_v2','не live'])assert.ok(html.includes(text),text);assert.doesNotMatch(html,/9007199254740992|scientific.*pass/i);
 });
+
+test('diagnostics entry uses Russian controls and exact source context without pins entry',()=>{
+ const html=renderToStaticMarkup(createElement(ui.SavedDiagnostics,{token:'secret',context:{selection:{run_uuid:'run',execution_id:'exec',attempt:2,calcjob_uuid:'job'},point_id:'point',native_binding_uuid:'binding',state_manifest_sha256:'a'.repeat(64)}}));
+ for(const text of ['Точка point','транспортная попытка 2','Прочитать описание диагностики выбранного состояния','без polling, расчёта или derive'])assert.ok(html.includes(text),text);
+ assert.doesNotMatch(html,/secret|Bearer|<input|Read first|Select explicitly/);
+});

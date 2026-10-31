@@ -1,3 +1,4 @@
+import type {Run} from './api.ts';
 /** Native5 public selected-source transport; no scientific resolver. */
 export interface SavedSelection {run_uuid:string;execution_id:string;attempt:number;calcjob_uuid:string}
 export interface FileRef {path:string;bytes:string;sha256:string;schema:string;media_type:string}
@@ -11,26 +12,54 @@ export type Masks=string|null|Masks[];
 export interface SavedSlice {source_state:StateRef;view_id:string;returned_shape:number[];logical_axes:string[];axes:SavedAxis[];values:Numbers;invalid_mask:Masks;units:string;basis?:string|null;conventions:Record<string,unknown>;recorded_statuses:Record<string,unknown>;fractions?:Record<string,unknown>|null;integrity?:Record<string,unknown>;source?:Record<string,unknown>}
 export type SavedManifest=Record<string,unknown>&{views:Record<string,SavedView>};
 export const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
-export function requireNative(v:unknown):asserts v {if(!v)throw new Error('Unsupported or changed native selection; refresh exact retained point');}
+export function requireNative(v:unknown):asserts v {if(!v)throw new Error('Источник или точный выбор изменился; обновите сведения выбранной точки');}
 export function sameValue(a:unknown,b:unknown):boolean {if(object(a)&&object(b)){const keys=Object.keys(a).sort();return keys.join('\0')===Object.keys(b).sort().join('\0')&&keys.every(k=>sameValue(a[k],b[k]));}if(Array.isArray(a)&&Array.isArray(b))return a.length===b.length&&a.every((v,i)=>sameValue(v,b[i]));return a===b;}
 const finite=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v);
-const hash=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v);
-const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(v);
-const count=(v:unknown,positive=false):v is string=>typeof v==='string'&&/^(0|[1-9][0-9]{0,19})$/.test(v)&&BigInt(v)<=18446744073709551615n&&(!positive||v!=='0');
+const hash=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}(?![\s\S])/.test(v);
+const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?![\s\S])/.test(v);
+const count=(v:unknown,positive=false):v is string=>typeof v==='string'&&/^(0|[1-9][0-9]{0,19})(?![\s\S])/.test(v)&&BigInt(v)<=18446744073709551615n&&(!positive||v!=='0');
 export function boundedNative(value:unknown){let nodes=0;const todo:[unknown,number][]=[[value,0]];while(todo.length){const [v,d]=todo.pop()!;requireNative(++nodes<=300000&&d<=64);if(typeof v==='number')requireNative(Number.isFinite(v));else if(Array.isArray(v))for(const x of v)todo.push([x,d+1]);else if(object(v))for(const x of Object.values(v))todo.push([x,d+1]);else requireNative(v===null||typeof v==='boolean'||typeof v==='string');}requireNative(new TextEncoder().encode(JSON.stringify(value)).byteLength<=2097152);}
 export function stateRef(value:unknown):asserts value is StateRef {
  requireNative(object(value)&&Object.keys(value).sort().join(',')==='identity,manifest,state_id,state_sequence'&&object(value.identity)&&object(value.manifest));
  const identity=value.identity,ref=value.manifest;
- requireNative(Object.keys(identity).sort().join(',')==='attempt,branch_id,execution_id,model_sha256,plan_sha256,point_id,run_id'&&['run_id','execution_id','point_id','branch_id'].every(k=>typeof identity[k]==='string'&&String(identity[k]).length>0)&&count(identity.attempt,true)&&hash(identity.model_sha256)&&hash(identity.plan_sha256)&&count(value.state_sequence)&&typeof value.state_id==='string'&&value.state_id.length>0);
- requireNative(Object.keys(ref).sort().join(',')==='bytes,media_type,path,schema,sha256'&&hash(ref.sha256)&&count(ref.bytes)&&typeof ref.path==='string'&&!ref.path.startsWith('/')&&!ref.path.split('/').includes('..')&&typeof ref.schema==='string'&&typeof ref.media_type==='string');
+ requireNative(Object.keys(identity).sort().join(',')==='attempt,branch_id,execution_id,model_sha256,plan_sha256,point_id,run_id'&&['run_id','execution_id','point_id','branch_id'].every(k=>portable(identity[k]))&&count(identity.attempt,true)&&hash(identity.model_sha256)&&hash(identity.plan_sha256)&&count(value.state_sequence,true)&&portable(value.state_id));
+ requireNative(Object.keys(ref).sort().join(',')==='bytes,media_type,path,schema,sha256'&&hash(ref.sha256)&&count(ref.bytes)&&typeof ref.path==='string'&&ref.path.length>0&&ref.path.length<=1024&&!/[\\\0:]/.test(ref.path)&&ref.path.split('/').every(p=>p!==''&&p!=='.'&&p!=='..')&&typeof ref.schema==='string'&&ref.schema.length>0&&typeof ref.media_type==='string'&&ref.media_type.length>0);
+}
+export interface PointSource {schema:'qcl-negf.portal-point-source.v1';status:'available';scope:'original_owner_metadata';provider_selection:SavedSelection;point:{point_id:string;point_attempt:number;plan_point_id:string};source:{kind:'absent'|'checkpoint'|'final';relation:'current_point_attempt'|'retained_source'|null;reason:string|null};source_state:StateRef|null;retained:NativeEnvelope['retained']}
+const exactKeys=(v:Record<string,unknown>,keys:string)=>Object.keys(v).sort().join(',')===keys.split(',').sort().join(',');
+const portable=(v:unknown)=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\s\S])/.test(v);
+function retainedDTO(value:unknown):asserts value is NativeEnvelope['retained'] {
+ requireNative(object(value)&&object(value.integrity));
+ for(const key of ['native_result','native_binding']){const pin=value[key];requireNative(object(pin)&&exactKeys(pin,'node_uuid,bytes,sha256')&&uuid(pin.node_uuid)&&count(pin.bytes)&&hash(pin.sha256));}
+ requireNative(sameValue(value.integrity.readback,{native_contexts:'not_reverified',current_access:'not_checked',scientific_acceptance:'not_assessed'})&&sameValue(value.integrity.original_binding,{scope:'selected_metadata',native_contexts:'verified',transport_owner:'verified',full_core_payloads:'not_assessed',current_access:'not_checked'}));
+}
+export function pointRequest(selection:SavedSelection,pointId:string){requireNative(exactKeys(selection as unknown as Record<string,unknown>,'run_uuid,execution_id,attempt,calcjob_uuid')&&uuid(selection.run_uuid)&&uuid(selection.calcjob_uuid)&&Number.isSafeInteger(selection.attempt)&&selection.attempt>0&&portable(selection.execution_id)&&portable(pointId));return {execution_id:selection.execution_id,attempt:selection.attempt,calcjob_uuid:selection.calcjob_uuid,point_id:pointId};}
+export function readPointSource(value:unknown,selection:SavedSelection,pointId:string):PointSource {
+ boundedNative(value);pointRequest(selection,pointId);
+ requireNative(object(value)&&exactKeys(value,'schema,status,scope,provider_selection,point,source,source_state,retained')&&value.schema==='qcl-negf.portal-point-source.v1'&&value.status==='available'&&value.scope==='original_owner_metadata'&&sameValue(value.provider_selection,selection));
+ requireNative(object(value.point)&&exactKeys(value.point,'point_id,point_attempt,plan_point_id')&&value.point.point_id===pointId&&value.point.plan_point_id===pointId&&Number.isSafeInteger(value.point.point_attempt)&&Number(value.point.point_attempt)>0&&object(value.source)&&exactKeys(value.source,'kind,relation,reason'));
+ retainedDTO(value.retained);requireNative(exactKeys(value.retained,'native_result,native_binding,creator,integrity')&&exactKeys(value.retained.integrity,'readback,original_binding'));
+ const creator=value.retained.creator,source=value.source;
+ if(source.kind==='absent')requireNative(value.source_state===null&&source.relation===null&&typeof source.reason==='string'&&source.reason.length>0&&creator===null);
+ else {
+  requireNative((source.kind==='checkpoint'||source.kind==='final')&&['current_point_attempt','retained_source'].includes(String(source.relation))&&((source.kind==='final'&&source.relation==='current_point_attempt')?source.reason===null:typeof source.reason==='string'&&source.reason.length>0));
+  stateRef(value.source_state);requireNative(value.source_state.identity.execution_id===selection.execution_id&&value.source_state.identity.point_id===pointId);
+  requireNative(object(creator)&&exactKeys(creator,'calcjob_uuid,binding_uuid')&&uuid(creator.calcjob_uuid)&&(creator.binding_uuid===null||uuid(creator.binding_uuid))&&((creator.calcjob_uuid===selection.calcjob_uuid)===(creator.binding_uuid===null)));
+ }
+ return value as unknown as PointSource;
+}
+export function pointContext(source:PointSource):NativeContext|null {if(source.source.kind==='absent'||!source.source_state)return null;return {selection:source.provider_selection,point_id:source.point.point_id,native_binding_uuid:String(source.retained.native_binding.node_uuid),state_manifest_sha256:source.source_state.manifest.sha256,state_ref:source.source_state};}
+export function pointChoice(token:string,run:Pick<Run,'uuid'|'children'|'plan_points'|'plan_fingerprint'>,job:string,pointId:string){
+ const selection=selectionOptions(run).find(v=>v.calcjob_uuid===job),points=(run.plan_points??[]).filter(p=>p.execution_id===selection?.execution_id&&p.id===pointId),point=points.length===1?points[0]:undefined;
+ return {selection,point,key:JSON.stringify([token,run.uuid,run.plan_fingerprint??null,job,pointId,selection??null,point?.id??null])};
 }
 export function nativePin(context:NativeContext){requireNative(uuid(context.selection.run_uuid)&&uuid(context.selection.calcjob_uuid)&&Number.isSafeInteger(context.selection.attempt)&&context.selection.attempt>0&&uuid(context.native_binding_uuid)&&hash(context.state_manifest_sha256));return {execution_id:context.selection.execution_id,attempt:context.selection.attempt,calcjob_uuid:context.selection.calcjob_uuid,provider:'native_nfs',point_id:context.point_id,native_binding_uuid:context.native_binding_uuid,state_manifest_sha256:context.state_manifest_sha256};}
 export function readNativeEnvelope(value:unknown,context:NativeContext,operation:string):NativeEnvelope {
  boundedNative(value);nativePin(context);requireNative(object(value)&&value.schema==='qcl-negf.portal-selected-reader.v2'&&value.operation===operation&&value.provider==='native_nfs'&&value.selection_mode==='retained'&&sameValue(value.provider_selection,context.selection));
  stateRef(value.source_state);const state=value.source_state;
  requireNative(state.identity.execution_id===context.selection.execution_id&&state.identity.point_id===context.point_id&&state.manifest.sha256===context.state_manifest_sha256&&(!context.state_ref||sameValue(state,context.state_ref))&&object(value.retained)&&object(value.access)&&object(value.view));
- for(const key of ['native_result','native_binding']){const pin=value.retained[key];requireNative(object(pin)&&uuid(pin.node_uuid)&&count(pin.bytes)&&hash(pin.sha256));}
- requireNative((value.retained.native_binding as Record<string,unknown>).node_uuid===context.native_binding_uuid&&object(value.retained.integrity)&&sameValue(value.retained.integrity.readback,{native_contexts:'not_reverified',current_access:'not_checked',scientific_acceptance:'not_assessed'})&&sameValue(value.retained.integrity.original_binding,{scope:'selected_metadata',native_contexts:'verified',transport_owner:'verified',full_core_payloads:'not_assessed',current_access:'not_checked'})&&value.access.status==='checked_ro_current_request'&&value.access.method==='local_binding_mountinfo_nofollow_domain'&&hash(value.access.config_sha256));
+ retainedDTO(value.retained);
+ requireNative(value.retained.native_binding.node_uuid===context.native_binding_uuid&&value.access.status==='checked_ro_current_request'&&value.access.method==='local_binding_mountinfo_nofollow_domain'&&hash(value.access.config_sha256));
  requireNative(sameValue(value.view.source_state??value.view.source,state));
  return value as unknown as NativeEnvelope;
 }

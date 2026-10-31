@@ -39,9 +39,9 @@ test('explicit state and component rendering preserves basis, populations and so
  for(const value of ['Saved state populations','state 3: -2','state 7: 9','saved_target_doping_unavailable','effective'])assert.ok(html.includes(value),value);
  assert.doesNotMatch(html,/sum of selected|normalized to 1|<script>/);
  const initial=renderToStaticMarkup(createElement(ui.SavedResultsPanel,{token:'secret',run:{uuid:'run',children:[{uuid:'job',execution_id:'ex',attempt:2}]}}));
- assert.match(initial,/Exact frozen point/);assert.match(initial,/Original native binding UUID/);assert.match(initial,/R1/);
+ assert.match(initial,/Точка исходного плана/);assert.match(initial,/Обновить сведения выбранной точки/);assert.match(initial,/R1/);
  assert.doesNotMatch(initial,/first child|latest file/);
- assert.match(initial,/Select explicitly/);assert.doesNotMatch(initial,/secret|Bearer|<option selected="" value="ex/);
+ assert.match(initial,/Выберите явно/);assert.doesNotMatch(initial,/secret|Bearer|<option selected="" value="ex/);
 });
 
 test('saved imaginary state curves and asymmetric native matrix keep independent mapping',()=>{
@@ -81,4 +81,26 @@ test('overflowing native centers visibly refuse graph and retain signed values/o
 test('negative native zero is explicit in unchanged value table',()=>{
  const slice={view_id:'density',returned_shape:[1],logical_axes:['z'],axes:[{name:'z',values:[0],units:'nm'}],values:[-0],invalid_mask:[null],units:'m^-3',conventions:{},recorded_statuses:{}};
  const html=renderToStaticMarkup(createElement(ui.SavedPlot,{slice}));assert.match(html,/-0 m\^-3/);
+});
+
+test('ordinary researcher refresh has no mandatory opaque pins',()=>{
+ const html=renderToStaticMarkup(createElement(ui.SavedResultsPanel,{token:'secret',run:{uuid:'run',children:[],plan_points:[]}}));
+ assert.match(html,/Обновить сведения выбранной точки/);
+ assert.doesNotMatch(html,/Original native binding UUID|Selected native manifest SHA|<input/);
+});
+test('C01 line axis labels preserve native signed zero',()=>{
+ const slice={view_id:'density',returned_shape:[2],logical_axes:['z'],axes:[{name:'z',values:[-0,1],units:'nm'}],values:[-0,2],invalid_mask:[null,null],units:'m^-3',conventions:{},recorded_statuses:{}};
+ const html=renderToStaticMarkup(createElement(ui.SavedPlot,{slice}));
+ assert.match(html,/<text x="52" y="275">-0<\/text>/);
+ assert.match(html,/<text x="4" y="250">-0<\/text>/);
+});
+
+test('metadata summary keeps absent, checkpoint and retained scope readable without editable pins',()=>{
+ const state={identity:{run_id:'native',execution_id:'exec',point_id:'point',attempt:'1',branch_id:'branch',model_sha256:'b'.repeat(64),plan_sha256:'c'.repeat(64)},state_id:'state',state_sequence:'1',manifest:{path:'state.json',bytes:'1',sha256:'a'.repeat(64),schema:'qcl-negf.result-manifest.v1',media_type:'application/json'}};
+ const base={schema:'qcl-negf.portal-point-source.v1',status:'available',scope:'original_owner_metadata',source_state:state,retained:{native_binding:{node_uuid:'binding-original'},creator:{calcjob_uuid:'original-creator',binding_uuid:'prior-binding'}},source:{kind:'final',relation:'retained_source',reason:'failed_new_attempt'}};
+ const retained=renderToStaticMarkup(createElement(ui.PointSourceSummary,{source:base}));
+ for(const text of ['Сохранённый источник другой попытки','научная приёмка не установлена','Исходные идентификаторы','original-creator','prior-binding','failed_new_attempt'])assert.ok(retained.includes(text),text);
+ assert.doesNotMatch(retained,/<input|<button|checked_ro_current_request/);
+ const absent=renderToStaticMarkup(createElement(ui.PointSourceSummary,{source:{...base,source_state:null,source:{kind:'absent',relation:null,reason:'not_recorded'}}}));assert.match(absent,/Источник отсутствует: not_recorded/);
+ const checkpoint=renderToStaticMarkup(createElement(ui.PointSourceSummary,{source:{...base,source:{kind:'checkpoint',relation:'current_point_attempt',reason:'interrupted'}}}));assert.match(checkpoint,/финальные карты не объявлены/);
 });

@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import logging
+import re
 import secrets
 import time
 from collections.abc import Generator
@@ -921,6 +922,58 @@ def create_app(settings: Settings | None = None, service: Any = None,
 
     @app.get("/api/v1/runs/{run_uuid}/saved-results/sources", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/brief", dependencies=protected)
+    async def saved_page(request: Request, run_uuid: str):
+        from .saved_nfs import _catalog_query
+
+        try:
+            params = request.query_params
+            operation = request.url.path.rsplit("/", 1)[1]
+            required = {"execution_id", "attempt", "calcjob_uuid"}
+            allowed = required | ({"limit", "cursor"} if operation == "sources" else {"page_ref"})
+            if (
+                len(request.scope.get("query_string", b"")) > 8192
+                or not required <= set(params)
+                or set(params) - allowed
+                or len(params.multi_items()) != len(set(params))
+                or request.headers.get("content-length", "0") != "0"
+                or request.headers.get("transfer-encoding")
+                or await request.body()
+                or str(UUID(run_uuid)) != run_uuid
+                or str(UUID(params["calcjob_uuid"])) != params["calcjob_uuid"]
+                or not re.fullmatch(r"[1-9][0-9]{0,15}", params["attempt"])
+            ):
+                raise SavedResultError("selection_required")
+            selection = dict(
+                run_uuid=run_uuid,
+                execution_id=params["execution_id"],
+                attempt=int(params["attempt"]),
+                calcjob_uuid=params["calcjob_uuid"],
+            )
+            query = {k: params[k] for k in set(params) - required}
+            if "limit" in query:
+                if not re.fullmatch(r"[1-8]", query["limit"]):
+                    raise SavedResultError("selection_required")
+                query["limit"] = int(query["limit"])
+            _catalog_query(operation, selection, query)
+        except SavedResultError, ValueError, KeyError, TypeError:
+            return JSONResponse(
+                {
+                    "detail": {
+                        "code": "selection_required",
+                        "reason": "Exact finite page selectors required",
+                    }
+                },
+                status_code=422,
+                headers={"Cache-Control": "no-store"},
+            )
+        return await saved_call(
+            request,
+            run_uuid,
+            operation,
+            {k: v for k, v in selection.items() if k != "run_uuid"},
+            query,
+        )
+
     @app.get("/api/v1/runs/{run_uuid}/saved-results/manifest", dependencies=protected)
     @app.get("/api/v1/runs/{run_uuid}/saved-results/diagnostics", dependencies=protected)
     async def saved_metadata(

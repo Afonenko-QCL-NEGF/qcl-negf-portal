@@ -3,11 +3,14 @@
 No root access occurs outside child_access. Binding startup reads local config only.
 """
 
+import base64
 import hashlib
 import json
+import math
 import os
 import re
 import stat
+import struct
 import tempfile
 from pathlib import Path
 from uuid import UUID
@@ -406,6 +409,8 @@ def _native_point(dto, selection, query, *, metadata=False):
 
 
 def native_perform(adapter, operation, selection, query, cancelled, deadline, check):
+    if operation in {"sources", "brief"}:
+        return _catalog_perform(adapter, operation, selection, query, cancelled, deadline, check)
     query = _native_query(operation, dict(query))
     if operation == "point-source" and (
         not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", selection["execution_id"])
@@ -586,6 +591,8 @@ class _NativeDomain:
 
 def native_read_request(request):
     """Only the existing isolated child opens native bytes; owners close here."""
+    if request.get("operation") == "brief":
+        return _brief_page_read(request)
     from dataclasses import asdict
 
     from qcl_negf_results.diagnostic_views import (
@@ -689,3 +696,679 @@ def native_read_request(request):
                     primary.cleanup_unconfirmed = True
                 else:
                     raise
+
+
+PAGE_SCHEMA = "qcl-negf.portal-native-page.v1"
+PAGE_IO = 128 * 1024 * 1024
+
+
+def _node_pin(value):
+    if type(value) is not dict or set(value) != {"node_uuid", "bytes", "sha256"}:
+        fail()
+    stored_uuid(value["node_uuid"])
+    digest(value["sha256"])
+    if (
+        type(value["bytes"]) is not str
+        or not re.fullmatch(r"0|[1-9][0-9]{0,19}", value["bytes"])
+        or int(value["bytes"]) > 18446744073709551615
+    ):
+        fail()
+
+
+def _page_decode(token):
+    """A bounded exact selector, revalidated against original pins on every call."""
+    try:
+        if (
+            type(token) is not str
+            or not 1 <= len(token) <= 2731
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", token)
+        ):
+            fail("selection_required")
+        raw = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
+        if len(raw) > 2048:
+            fail("selection_required")
+        value = _json(raw)
+        if (
+            type(value) is not dict
+            or set(value)
+            != {
+                "schema",
+                "provider_selection",
+                "native_result",
+                "native_binding",
+                "input_plan",
+                "source_graph",
+                "offset",
+                "limit",
+            }
+            or value["schema"] != PAGE_SCHEMA
+            or type(value["offset"]) is not str
+            or not re.fullmatch(r"0|[1-9][0-9]{0,19}", value["offset"])
+            or int(value["offset"]) > 18446744073709551615
+            or type(value["limit"]) is not int
+            or not 1 <= value["limit"] <= 8
+        ):
+            fail("selection_required")
+        from .saved_results import _selection
+
+        _selection(value["provider_selection"])
+        for k in ("native_result", "native_binding", "input_plan", "source_graph"):
+            _node_pin(value[k])
+        if _page_encode(value) != token:
+            fail("selection_required")
+        return value
+    except (ValueError, TypeError, KeyError, SavedResultError) as exc:
+        raise SavedResultError("selection_required") from exc
+
+
+def _page_encode(value):
+    raw = canonical(value)
+    if len(raw) > 2048:
+        fail("budget_exceeded")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _catalog_query(operation, selection, query):
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", selection["execution_id"])
+        or not 1 <= selection["attempt"] <= 9007199254740991
+    ):
+        fail("selection_required")
+    if operation == "sources" and set(query) <= {"limit"}:
+        limit = query.get("limit", 8)
+        if type(limit) is not int or not 1 <= limit <= 8:
+            fail("selection_required")
+        return None, 0, limit
+    key = "cursor" if operation == "sources" else "page_ref"
+    if set(query) != {key}:
+        fail("selection_required")
+    token = _page_decode(query[key])
+    if not same(token["provider_selection"], selection):
+        fail("identity_mismatch")
+    return token, int(token["offset"]), token["limit"]
+
+
+def _declared_number(value):
+    # Scientific-plan JSON integers have no Int64/u64/Float64 range restriction.
+    if type(value) is int:
+        return dict(kind="json_integer", decimal=str(value))
+    if type(value) is not float or not math.isfinite(value):
+        fail()
+    return dict(kind="ieee", type="f64", bits=struct.pack(">d", value).hex())
+
+
+def _recorded_coordinates(recorded, declared):
+    # Match the owning binder: branch/order exact; recorded T/V by binary64 bits.
+    if type(recorded) is not dict or set(recorded) != set(declared):
+        return False
+    if any(not same(recorded[k], declared[k]) for k in ("branch", "order")):
+        return False
+    try:
+        return all(
+            type(recorded[k]) in (int, float)
+            and struct.pack(">d", recorded[k]) == struct.pack(">d", declared[k])
+            for k in ("temperature_K", "voltage_per_period_V")
+        )
+    except OverflowError, struct.error:
+        return False
+
+
+def _catalog_dto(dto, selection):
+    """One whole original metadata validation, without repeated B reads/copies."""
+    from qcl_negf_contracts import schema_validator
+
+    try:
+        if (
+            type(dto) is not dict
+            or set(dto)
+            != {
+                "status",
+                "point",
+                "binding",
+                "result_utf8",
+                "native_result",
+                "native_binding",
+                "integrity",
+                "declared_points",
+            }
+            or dto["status"] != "available"
+            or dto["point"] is not None
+        ):
+            fail("unsupported_contract")
+        _bytes(dto)  # Admit the complete owner response before retained projections.
+        binding = dto["binding"]
+        if (
+            type(binding) is not dict
+            or set(binding)
+            != {
+                "schema",
+                "selection",
+                "input_plan",
+                "source_graph",
+                "storage",
+                "raw_result",
+                "points",
+                "attempt_history",
+                "integrity",
+            }
+            or binding["schema"] != "qcl-negf.aiida-native-binding.v1"
+            or not same(binding["selection"], selection)
+        ):
+            fail("identity_mismatch")
+        pins = {
+            k: dto[k] if k in ("native_result", "native_binding") else binding[k]
+            for k in ("native_result", "native_binding", "input_plan", "source_graph")
+        }
+        for pin in pins.values():
+            _node_pin(pin)
+        raw = dto["result_utf8"].encode("utf-8")
+        raw_ref = dict(bytes=str(len(raw)), sha256=sha(raw))
+        if raw_ref != binding["raw_result"] or any(
+            raw_ref[k] != pins["native_result"][k] for k in raw_ref
+        ):
+            fail("identity_mismatch")
+        if dto["integrity"] != dict(
+            native_contexts="not_reverified",
+            current_access="not_checked",
+            scientific_acceptance="not_assessed",
+        ):
+            fail()
+        if binding["integrity"] != dict(
+            scope="selected_metadata",
+            native_contexts="verified",
+            transport_owner="verified",
+            full_core_payloads="not_assessed",
+            current_access="not_checked",
+        ):
+            fail("unsupported_contract")
+        declared = dto["declared_points"]
+        if type(declared) is not list or type(binding["points"]) is not list:
+            fail()
+        byid = {}
+        for p in declared:
+            if (
+                type(p) is not dict
+                or set(p)
+                != {
+                    "id",
+                    "execution_id",
+                    "temperature_K",
+                    "voltage_per_period_V",
+                    "branch",
+                    "order",
+                }
+                or p["execution_id"] != selection["execution_id"]
+                or p["id"] in byid
+                or type(p["id"]) is not str
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", p["id"])
+                or type(p["branch"]) is not str
+                or type(p["order"]) is not int
+                or p["order"] < 1
+            ):
+                fail()
+            # Validate numeric types now; construct tags only for the bounded page.
+            for k in ("temperature_K", "voltage_per_period_V"):
+                if (
+                    type(p[k]) not in (int, float)
+                    or type(p[k]) is float
+                    and not math.isfinite(p[k])
+                ):
+                    fail()
+            byid[p["id"]] = p
+        raw_points = _json(raw)["points"]
+        if type(raw_points) is not list:
+            fail()
+        raw_byid = {r["id"]: r for r in raw_points}
+        if len(raw_byid) != len(raw_points):
+            fail()
+        selected = {}
+        validator = schema_validator("outward-result.schema.json")
+        validator = validator.evolve(
+            schema={"$ref": "#/$defs/NativePointSource", "$defs": validator.schema["$defs"]}
+        )
+        for p in binding["points"]:
+            if (
+                type(p) is not dict
+                or set(p)
+                != {
+                    "point_id",
+                    "point_attempt",
+                    "source",
+                    "source_invocation",
+                    "creator",
+                    "plan_point_id",
+                    "coordinates",
+                }
+                or p["point_id"] in selected
+                or p["point_id"] not in byid
+                or p["plan_point_id"] != p["point_id"]
+                or type(p["point_attempt"]) is not int
+                or not 1 <= p["point_attempt"] <= 18446744073709551615
+            ):
+                fail()
+            declared_point = byid[p["point_id"]]
+            coords = {
+                k: declared_point[k]
+                for k in ("temperature_K", "voltage_per_period_V", "branch", "order")
+            }
+            row = raw_byid[p["point_id"]]
+            if (
+                not _recorded_coordinates(p["coordinates"], coords)
+                or type(row["attempt"]) is not int
+                or row["attempt"] != p["point_attempt"]
+                or not same(row["coordinates"], p["coordinates"])
+                or not same(row["data"]["native_source"], p["source"])
+                or row.get("execution_id", selection["execution_id"]) != selection["execution_id"]
+            ):
+                fail("identity_mismatch")
+            source = p["source"]
+            validator.validate(source)
+            if source["kind"] == "absent":
+                if p["creator"] is not None or p["source_invocation"] is not None:
+                    fail()
+            else:
+                state = source["selected_state"]
+                _path(state["manifest"]["path"])
+                if (
+                    state["identity"]["point_id"] != p["point_id"]
+                    or state["identity"]["execution_id"] != selection["execution_id"]
+                ):
+                    fail("identity_mismatch")
+                creator, invocation = p["creator"], p["source_invocation"]
+                if (
+                    type(creator) is not dict
+                    or set(creator) != {"calcjob_uuid", "binding_uuid"}
+                    or type(invocation) is not dict
+                    or set(invocation) != {"source_epoch"}
+                    or type(invocation["source_epoch"]) is not str
+                    or not invocation["source_epoch"]
+                ):
+                    fail()
+                stored_uuid(creator["calcjob_uuid"])
+                if creator["binding_uuid"] is not None:
+                    stored_uuid(creator["binding_uuid"])
+                if (creator["calcjob_uuid"] == selection["calcjob_uuid"]) != (
+                    creator["binding_uuid"] is None
+                ):
+                    fail("identity_mismatch")
+            if (
+                any(
+                    row.get(k) is not None and type(row[k]) is not str
+                    for k in ("status", "quality")
+                )
+                or row.get("converged") is not None
+                and type(row["converged"]) is not bool
+            ):
+                fail()
+            selected[p["point_id"]] = (p, row)
+        if set(selected) != set(raw_byid):
+            fail("identity_mismatch")
+        return binding, pins, declared, selected
+    except SavedResultError:
+        raise
+    except Exception as exc:
+        raise SavedResultError("corrupt_result") from exc
+
+
+def _catalog_perform(adapter, operation, selection, query, cancelled, deadline, check):
+    token, offset, limit = _catalog_query(operation, selection, query)
+    method = getattr(adapter.service, "get_native_result_source", None)
+    if not callable(method):
+        fail("unsupported_contract")
+    dto = method(
+        selection["run_uuid"],
+        selection["execution_id"],
+        attempt=selection["attempt"],
+        calcjob_uuid=selection["calcjob_uuid"],
+        point_id=None,
+        binding_uuid=None if token is None else token["native_binding"]["node_uuid"],
+    )
+    check()
+    binding, pins, declared, selected = _catalog_dto(dto, selection)
+    if token is not None and any(not same(token[k], v) for k, v in pins.items()):
+        fail("source_changed")
+    total = len(declared)
+    if offset > total or total and offset == total:
+        fail("selection_required")
+
+    def cursor(at):
+        return _page_encode(
+            dict(
+                schema=PAGE_SCHEMA,
+                provider_selection=selection,
+                **pins,
+                offset=str(at),
+                limit=limit,
+            )
+        )
+
+    answer = dict(
+        schema="qcl-negf.portal-native-sources.v1",
+        scope="original_owner_metadata",
+        provider_selection=selection,
+        retained=dict(
+            **pins, integrity=dict(readback=dto["integrity"], original_binding=binding["integrity"])
+        ),
+        pagination=dict(
+            offset=str(offset),
+            limit=limit,
+            total=str(total),
+            page_ref=cursor(offset),
+            previous_cursor=cursor(max(0, offset - limit)) if offset else None,
+            next_cursor=cursor(offset + limit) if offset + limit < total else None,
+        ),
+        points=[],
+    )
+    finals = []
+    for d in declared[offset : offset + limit]:
+        point_row = selected.get(d["id"])
+        p, raw_row = point_row if point_row else (None, {})
+        source = None if p is None else p["source"]
+        row = dict(
+            point_id=d["id"],
+            declared_coordinates=dict(
+                temperature_K=_declared_number(d["temperature_K"]),
+                voltage_per_period_V=_declared_number(d["voltage_per_period_V"]),
+                branch=d["branch"],
+                order=str(d["order"]),
+            ),
+            row_status="not_recorded" if p is None else "recorded",
+            point_attempt=None if p is None else str(p["point_attempt"]),
+            source=None
+            if source is None
+            else {k: source[k] for k in ("kind", "relation", "reason")},
+            source_state=None if source is None else source["selected_state"],
+            source_invocation=None if p is None else p["source_invocation"],
+            observations_ref=source["observations"]
+            if source is not None and source["kind"] == "final"
+            else None,
+            creator=None if p is None else p["creator"],
+            recorded_statuses={k: raw_row.get(k) for k in ("status", "quality", "converged")},
+            missing_reason="result_row_absent" if p is None else None,
+        )
+        if operation == "brief":
+            kind = None if source is None else source["kind"]
+            row.update(
+                read=dict(
+                    status="not_recorded"
+                    if p is None
+                    else "checkpoint_only"
+                    if kind == "checkpoint"
+                    else "available"
+                    if kind == "final"
+                    else "absent",
+                    reason="result_row_absent" if p is None else source["reason"],
+                ),
+                access=None,
+                view=None,
+            )
+            if kind == "final":
+                local = adapter.binding
+                storage = binding["storage"]
+                if (
+                    local is None
+                    or any(storage.get(k) != local[k] for k in REFS)
+                    or storage.get("computer_uuid") not in local["allowed_computer_uuids"]
+                ):
+                    fail("unavailable_storage")
+                relative = path(storage["relative_execution_root"])
+                if source["artifact_root"] != ".":
+                    relative = path(relative + "/" + path(source["artifact_root"]))
+                finals.append(
+                    dict(
+                        point_id=d["id"],
+                        relative_root=relative,
+                        state_ref=source["selected_state"],
+                        source=source,
+                        source_invocation=p["source_invocation"],
+                    )
+                )
+        answer["points"].append(row)
+    _bytes(answer)
+    check()
+    if operation == "sources":
+        return answer
+    answer["schema"] = "qcl-negf.portal-native-brief.v1"
+    answer["credits"] = dict(
+        final_sources=0, stage_share=0, reserved_bytes=0, actual_delivered_bytes=0, epochs=[]
+    )
+    if not finals:
+        _bytes(answer)
+        return answer
+    # Equal nonrefundable output slots are admitted before any root/spool read.
+    allowance = (2 * 1024 * 1024 - len(_bytes(answer)) - 16384) // len(finals)
+    if allowance < 2048:
+        fail("budget_exceeded")
+    request = dict(
+        binding=adapter.binding,
+        binding_sha256=sha(canonical(adapter.binding)),
+        points=finals,
+        output_slot=allowance,
+    )
+    _bytes(dict(operation="brief", **request))
+    spool = tempfile.TemporaryDirectory(prefix="qcl-native-page-")
+    primary = None
+    try:
+        check()
+        result = adapter.worker("brief", request, Path(spool.name), cancelled, deadline)
+        check()
+        if (
+            type(result) is not dict
+            or set(result) != {"points", "credits"}
+            or len(result["points"]) != len(finals)
+        ):
+            fail()
+        for expected, actual in zip(finals, result["points"], strict=True):
+            _brief_binding(actual, expected, request["binding_sha256"])
+        _page_credits(result["credits"], finals)
+        updates = {p["point_id"]: p for p in result["points"]}
+        for row in answer["points"]:
+            if row["point_id"] in updates:
+                row.update(
+                    view=updates[row["point_id"]]["view"], access=updates[row["point_id"]]["access"]
+                )
+        answer["credits"] = result["credits"]
+        _bytes(answer)
+        return answer
+    except BaseException as exc:
+        primary = exc
+        if getattr(exc, "cleanup_unconfirmed", False):
+            adapter.closed = adapter.lease_cleanup_unconfirmed = True
+            adapter.pending_spools.append(spool)
+            spool = None
+        raise
+    finally:
+        if spool is not None:
+            try:
+                spool.cleanup()
+            except OSError as exc:
+                adapter.closed = adapter.lease_cleanup_unconfirmed = True
+                adapter.pending_spools.append(spool)
+                if primary is not None:
+                    primary.cleanup_unconfirmed = True
+                else:
+                    error = SavedResultError("unavailable_storage")
+                    error.cleanup_unconfirmed = True
+                    raise error from exc
+
+
+def _brief_binding(actual, expected, config_sha256):
+    if (
+        type(actual) is not dict
+        or set(actual) != {"point_id", "view", "access"}
+        or actual["point_id"] != expected["point_id"]
+    ):
+        fail("identity_mismatch")
+    view = actual["view"]
+    if (
+        type(view) is not dict
+        or not {"source_state", "identity", "invocation", "artifact_ref"} <= set(view)
+        or not same(view["source_state"], expected["state_ref"])
+        or not same(view["identity"], expected["state_ref"]["identity"])
+        or not same(view["invocation"], expected["source_invocation"])
+        or not same(view["artifact_ref"], expected["source"]["observations"])
+    ):
+        fail("identity_mismatch")
+    if actual["access"] != dict(
+        status="checked_ro_current_request",
+        method="local_binding_mountinfo_nofollow_domain",
+        config_sha256=config_sha256,
+    ):
+        fail("unavailable_storage")
+
+
+def _page_credits(credits, points):
+    share = PAGE_IO // (2 * len(points))
+    if (
+        type(credits) is not dict
+        or set(credits)
+        != {"final_sources", "stage_share", "reserved_bytes", "actual_delivered_bytes", "epochs"}
+        or credits["final_sources"] != len(points)
+        or credits["stage_share"] != share
+        or credits["reserved_bytes"] != 2 * len(points) * share
+        or type(credits["epochs"]) is not list
+        or len(credits["epochs"]) != len(points)
+    ):
+        fail()
+    measured = 0
+    for p, epoch in zip(points, credits["epochs"], strict=True):
+        if (
+            type(epoch) is not dict
+            or set(epoch) != {"point_id", "initialization", "brief_and_close"}
+            or epoch["point_id"] != p["point_id"]
+        ):
+            fail()
+        for phase in ("initialization", "brief_and_close"):
+            counter = epoch[phase]
+            if (
+                type(counter) is not dict
+                or set(counter)
+                != {
+                    "bytes_read_total",
+                    "sha_bytes",
+                    "hdf_bytes",
+                    "metadata_bytes",
+                    "logical_selected_bytes",
+                    "maximum_io_bytes",
+                }
+                or any(type(v) is not int or v < 0 for v in counter.values())
+                or counter["maximum_io_bytes"] != share
+                or counter["bytes_read_total"] > share
+                or counter["logical_selected_bytes"] != 0
+                or counter["bytes_read_total"]
+                != sum(counter[k] for k in ("sha_bytes", "hdf_bytes", "metadata_bytes"))
+            ):
+                fail()
+            measured += counter["bytes_read_total"]
+    if (
+        type(credits["actual_delivered_bytes"]) is not int
+        or credits["actual_delivered_bytes"] != measured
+    ):
+        fail()
+
+
+def _brief_page_read(request):
+    from qcl_negf_results.saved_views import AnalysisReader, SavedViewLimits
+    from qcl_negf_results.state import ResultReadLimits, StateReader
+
+    if set(request) != {"operation", "binding", "binding_sha256", "points", "output_slot"}:
+        fail("selection_required")
+    binding = validate_binding(request["binding"])
+    if sha(canonical(binding)) != request["binding_sha256"]:
+        fail("identity_mismatch")
+    points = request["points"]
+    if (
+        type(points) is not list
+        or not 1 <= len(points) <= 8
+        or type(request["output_slot"]) is not int
+        or not 1024 <= request["output_slot"] <= 2 * 1024 * 1024
+    ):
+        fail("selection_required")
+    share = PAGE_IO // (2 * len(points))
+    result = dict(
+        points=[],
+        credits=dict(
+            final_sources=len(points),
+            stage_share=share,
+            reserved_bytes=2 * len(points) * share,
+            actual_delivered_bytes=0,
+            epochs=[],
+        ),
+    )
+    seen = set()
+    for p in points:
+        if (
+            type(p) is not dict
+            or set(p) != {"point_id", "relative_root", "state_ref", "source", "source_invocation"}
+            or p["point_id"] in seen
+            or p["source"]["kind"] != "final"
+            or not same(p["state_ref"], p["source"]["selected_state"])
+            or p["state_ref"]["identity"]["point_id"] != p["point_id"]
+        ):
+            fail("identity_mismatch")
+        seen.add(p["point_id"])
+        domain = None
+        primary = None
+        try:
+            domain = _NativeDomain(binding, path(p["relative_root"]))
+            with StateReader(
+                domain.root,
+                state_ref=p["state_ref"],
+                expected_identity=p["state_ref"]["identity"],
+                limits=ResultReadLimits(
+                    maximum_metadata_bytes=METADATA,
+                    maximum_io_bytes=share,
+                    maximum_catalog_entries=4096,
+                    maximum_catalog_bytes=METADATA,
+                    maximum_open_files=4,
+                    maximum_batch_bytes=METADATA,
+                    maximum_record_bytes=METADATA,
+                    maximum_hdf_objects=4096,
+                    maximum_array_bytes=METADATA,
+                ),
+            ) as reader:
+                initialization = dict(reader.io_counters)
+                with AnalysisReader(
+                    reader,
+                    artifact_ref=p["source"]["observations"],
+                    limits=SavedViewLimits(
+                        maximum_io_bytes=share, maximum_json_bytes=request["output_slot"] - 1024
+                    ),
+                ) as facade:
+                    view = facade.brief()
+            closed = dict(reader.io_counters)
+            domain.check()
+            item = dict(
+                point_id=p["point_id"],
+                view=view,
+                access=dict(
+                    status="checked_ro_current_request",
+                    method="local_binding_mountinfo_nofollow_domain",
+                    config_sha256=request["binding_sha256"],
+                ),
+            )
+            _brief_binding(item, p, request["binding_sha256"])
+            # Public return already respects the reserved slot; no partial page escapes.
+            if len(_bytes(item)) > request["output_slot"]:
+                fail("budget_exceeded")
+            result["points"].append(item)
+            result["credits"]["epochs"].append(
+                dict(point_id=p["point_id"], initialization=initialization, brief_and_close=closed)
+            )
+            result["credits"]["actual_delivered_bytes"] += (
+                initialization["bytes_read_total"] + closed["bytes_read_total"]
+            )
+            _bytes(result)
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            if domain is not None:
+                try:
+                    domain.close()
+                except BaseException:
+                    if primary is not None:
+                        primary.cleanup_unconfirmed = True
+                    else:
+                        raise
+    return result

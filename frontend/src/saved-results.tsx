@@ -2,8 +2,8 @@ import {useEffect,useRef,useState} from 'react';
 import {SavedDiagnostics} from './saved-diagnostics.tsx';
 import {api,errorMessage} from './api';
 import type {Run} from './api';
-import {cellEdges,displayScale,readManifest,readSlice,nativePin,SavedSession,selectionOptions,pointChoice,pointRequest,readPointSource,pointContext} from './saved-results-data';
-import type {Masks,Numbers,SavedAxis,SavedSlice,SavedView,PointSource,NativeEnvelope,SavedManifest} from './saved-results-data';
+import {cellEdges,displayScale,readManifest,readSlice,nativePin,SavedSession,selectionOptions,pointChoice,pointRequest,readPointSource,pointContext,catalogChoice,catalogRequest,readSources,readBrief,declaredText,ieeeCell} from './saved-results-data';
+import type {Masks,Numbers,SavedAxis,SavedSlice,SavedView,PointSource,NativeEnvelope,SavedManifest,SourcesPage,BriefPage,BriefPoint} from './saved-results-data';
 
 const show=(v:unknown,precision?:number)=>v==null?'unknown':typeof v==='object'?JSON.stringify(v):typeof v==='number'?(Object.is(v,-0)?'-0':precision?v.toPrecision(precision):String(v)):String(v);
 const number=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v);
@@ -144,8 +144,9 @@ export function SavedResultsPanel({token,run}:{token:string;run:Run}){
  }
  return <section className="saved-results"><h3>Сохранённые результаты точки</h3>
  <p>Выберите исполнение, транспортную попытку, CalcJob и точку исходного плана. Затем явно обновите сведения источника. Номер native-попытки хранится отдельно; чтение не запускает расчёт или derive.</p>
- <p>Каталог всех точек/J(V) (R1), текущая история (R3), retrieved (R4) и performance (R5) ожидают отдельных контрактов производителей.</p>
+ <p>Каталог/J(V) (R1) читается явно по конечным страницам. Текущая история (R3), retrieved (R4) и performance (R5) остаются отдельными контрактами.</p>
  <label>Исполнение / попытка / CalcJob<select value={choice} onChange={e=>{reset();setChoice(e.target.value);setPointId('');}}><option value="">Выберите явно</option>{options.map(v=><option key={v.calcjob_uuid} value={v.calcjob_uuid}>{v.execution_id} · попытка {v.attempt} · {v.calcjob_uuid}</option>)}</select></label>
+ <SavedCatalogPanel token={token} run={run} job={choice}/>
  <label>Точка исходного плана<select value={pointId} onChange={e=>{reset();setPointId(e.target.value);}}><option value="">Выберите точку</option>{points.map(p=><option key={p.id} value={p.id}>{p.id} · {show(p.temperature_K)} K · {show(p.voltage_per_period_V)} V</option>)}</select></label>
  {!points.length&&<p>Список точек исходного плана для этого исполнения недоступен.</p>}
  <button type="button" disabled={!selection||!point||busy===contextKey} onClick={()=>void refresh()}>Обновить сведения выбранной точки</button>
@@ -162,4 +163,55 @@ export function SavedResultsPanel({token,run}:{token:string;run:Run}){
  {(fields[`${i}:mode`]==='index'?['index']:['start','stop','step']).map(k=><label key={k}>{({index:'Индекс',start:'Начало',stop:'Конец (не включается)',step:'Шаг'} as Record<string,string>)[k]}<input value={fields[`${i}:${k}`]??''} onChange={e=>{invalidate();setFields(f=>({...f,[`${i}:${k}`]:e.target.value}));}}/></label>)}</fieldset>)}
  <button type="button" disabled={busy===contextKey} onClick={()=>void load('slice')}>Прочитать точную выборку</button></>}
  {shown&&<SavedPlot slice={shown}/>}</section>;
+}
+
+export function SavedBrief({page}:{page:BriefPage}){
+ const plotted=page.points.filter(p=>p.view).map(p=>({id:p.point_id,x:ieeeCell(p.view!.request.coordinate_checks.voltage.actual),j:ieeeCell(p.view!.scalar_observables.current_density_A_per_m2)})).filter(p=>p.x.value!==null&&p.j.value!==null);
+ return <><p>J — сохранённая знаковая плотность тока в A/m²; V — actual voltage per period из сохранённого request. Точки показаны без соединяющих линий. Сопоставимость физических постановок не установлена.</p>
+ <Lines markersOnly paths={plotted.map(p=>[[p.x.value!,p.j.value!]])} labels={plotted.map(p=>p.id)} xlabel="V per period (V)" ylabel="J (A/m²)"/>
+ <p>Process, сходимость, physical gates, discretization и научная приёмка оцениваются раздельно. Неизмеренное остаётся not_measured.</p></>;
+}
+
+export function SavedCatalogPanel({token,run,job}:{token:string;run:Run;job:string}){
+ const {selection,key}=catalogChoice(token,run,job),session=useRef(new SavedSession()),identity=useRef('');
+ if(identity.current!==key){session.current.invalidate();identity.current=key;}
+ const [metadata,setMetadata]=useState<{key:string;value:SourcesPage}|null>(null),[brief,setBrief]=useState<{key:string;value:BriefPage}|null>(null);
+ const [busy,setBusy]=useState<{key:string;operation:string}|null>(null),[error,setError]=useState<{key:string;text:string}|null>(null);
+ const page=metadata?.key===key?metadata.value:null,view=page&&brief?.key===key&&brief.value.pagination.page_ref===page.pagination.page_ref?brief.value:null;
+ const pending=busy?.key===key;
+ useEffect(()=>{session.current.invalidate();setMetadata(null);setBrief(null);setError(null);setBusy(null);return()=>session.current.invalidate();},[key]);
+ async function sources(cursor?:string){
+  if(!selection)return;
+  const exact=selection,g=session.current.begin();setMetadata(null);setBrief(null);setError(null);setBusy({key,operation:'catalog'});
+  await session.current.receive(g,async()=>{
+   const query=new URLSearchParams(Object.entries(catalogRequest(exact,cursor?{cursor}:{limit:8})).map(([k,v])=>[k,String(v)]));
+   return readSources(await api(token,`/runs/${encodeURIComponent(exact.run_uuid)}/saved-results/sources?${query}`),exact,cursor);
+  },value=>{setMetadata({key,value:value as SourcesPage});setBusy(null);},e=>{setError({key,text:errorMessage(e)});setBusy(null);});
+ }
+ async function readPage(){
+  if(!page)return;
+  const exact=page,g=session.current.begin();setBrief(null);setError(null);setBusy({key,operation:'brief'});
+  await session.current.receive(g,async()=>{
+   const query=new URLSearchParams(Object.entries(catalogRequest(exact.provider_selection,{page_ref:exact.pagination.page_ref})).map(([k,v])=>[k,String(v)]));
+   return readBrief(await api(token,`/runs/${encodeURIComponent(exact.provider_selection.run_uuid)}/saved-results/brief?${query}`),exact);
+  },value=>{setBrief({key,value:value as BriefPage});setBusy(null);},e=>{setError({key,text:errorMessage(e)});setBusy(null);});
+ }
+ const rows=view?.points??page?.points??[];
+ return <section aria-label="Каталог сохранённых точек"><h4>Каталог и J(V) выбранного исполнения</h4>
+ <p>Исходный frozen plan включает необсчитанные точки. Declared координаты не являются used snapshot. Чтение страницы не запускает расчёт.</p>
+ <button type="button" disabled={!selection||pending} onClick={()=>void sources()}>Прочитать каталог</button>
+ {pending&&<p role="status">Чтение {busy?.operation==='brief'?'J(V) текущей страницы':'каталога'}…</p>}
+ {error?.key===key&&<p role="alert" className="error">{error.text}</p>}
+ {page&&<><p>Offset {page.pagination.offset}; на странице {page.points.length} из {page.pagination.total} объявленных точек. Метаданные исходного владельца; доступ к файлам ещё не проверен.</p>
+ <button type="button" disabled={pending||page.pagination.previous_cursor===null} onClick={()=>void sources(page.pagination.previous_cursor!)}>Предыдущая страница</button>
+ <button type="button" disabled={pending||page.pagination.next_cursor===null} onClick={()=>void sources(page.pagination.next_cursor!)}>Следующая страница</button>
+ <button type="button" disabled={pending} onClick={()=>void readPage()}>Прочитать J(V) этой страницы</button>
+ <div className="saved-table"><table><thead><tr><th>Точка / branch / order</th><th>Declared T (K), V per period (V)</th><th>Источник / статус</th><th>Actual V (V)</th><th>Signed J (A/m²)</th></tr></thead><tbody>{rows.map(row=>{
+  const final=(row as BriefPoint).view,x=final?ieeeCell(final.request.coordinate_checks.voltage.actual):null,j=final?ieeeCell(final.scalar_observables.current_density_A_per_m2):null;
+  const issue=final?.issues.find(i=>i.target==='current_density_A_per_m2');
+  return <tr key={row.point_id}><td>{row.point_id} · {row.declared_coordinates.branch} · {row.declared_coordinates.order}</td><td>{declaredText(row.declared_coordinates.temperature_K)} K; {declaredText(row.declared_coordinates.voltage_per_period_V)} V</td><td>{row.source?.kind??row.missing_reason}; {row.source?.reason}; {JSON.stringify(row.recorded_statuses)}</td><td>{x?.text??'not_read'}</td><td>{j?.text??'not_read'} {issue?.reason?String(issue.reason):''}</td></tr>;
+ })}</tbody></table></div>
+ <details><summary>Исходные pins, full StateRef и статусы страницы</summary><pre>{JSON.stringify(page,null,2)}</pre></details></>}
+ {view&&<><SavedBrief page={view}/><p>Наблюдение RO относится только к этому запросу. Original binding integrity, public selected-byte integrity и scientific acceptance различаются.</p><details><summary>Raw IEEE tags, actual request, original/current/restoration evidence и I/O epochs</summary><pre>{JSON.stringify(view,null,2)}</pre></details></>}
+ </section>;
 }

@@ -8,6 +8,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
+
 from qcl_negf_api.saved_results import SavedResultError, SavedResults
 from qcl_negf_api.service import CloseResult
 
@@ -32,6 +33,7 @@ BINDING = dict(
 @pytest.fixture
 def native_case(tmp_path, monkeypatch):
     from consumer_context_fixture import semantic_fixture
+
     from qcl_negf_api import saved_nfs, saved_results
 
     root = tmp_path / "alias"
@@ -161,6 +163,415 @@ def read(case, operation, extra=None):
     return asyncio.run(run())
 
 
+@pytest.fixture
+def catalog_case(native_case, monkeypatch):
+    """NEW independent tiny owners; original metadata is a manufactured owner reply."""
+    import result_v2_fixture
+    from consumer_context_fixture import fixture
+
+    def make(finals=2, gaps=True, declared_count=None, huge=False):
+        c = native_case
+        declared, points, rows = [], [], []
+        count = finals + (3 if gaps else 0) if declared_count is None else declared_count
+        for i in range(count):
+            name = f"p{i}"
+            coords = dict(
+                temperature_K=200.0,
+                voltage_per_period_V=-0.0 if i == 0 else 0.05,
+                branch="reverse" if i % 2 else "forward",
+                order=i + 1,
+            )
+            if huge:
+                coords.update(
+                    temperature_K=10**2000, voltage_per_period_V=10**2000, order=10**2000 + i
+                )
+            declared.append(dict(id=name, execution_id="exec", **coords))
+            if i >= finals and (not gaps or i == finals + 2):
+                continue
+            if i < finals:
+                monkeypatch.setitem(result_v2_fixture.IDENTITY, "point_id", name)
+                root = c.data / name
+                state, observations, _, _, _ = fixture(root, nz=2)
+                source = dict(
+                    c.source, selected_state=state, observations=observations, artifact_root=name
+                )
+                manifest = json.loads((root / state["manifest"]["path"]).read_bytes())
+                source["diagnostics"] = next(
+                    {k: v[k] for k in ("path", "bytes", "sha256", "schema", "media_type")}
+                    for v in manifest["artifacts"]
+                    if v["role"] == "physics.analysis" and v["path"] != observations["path"]
+                )
+            elif i == finals:
+                source = dict(
+                    c.source,
+                    kind="absent",
+                    selected_state=None,
+                    diagnostics=None,
+                    observations=None,
+                    relation=None,
+                    reason="not_recorded",
+                )
+            else:
+                state = deepcopy(c.state)
+                state["identity"]["point_id"] = name
+                source = dict(
+                    c.source,
+                    kind="checkpoint",
+                    selected_state=state,
+                    diagnostics=None,
+                    observations=None,
+                    reason="interrupted",
+                )
+            point = dict(
+                point_id=name,
+                point_attempt=9,
+                plan_point_id=name,
+                coordinates=coords,
+                source=source,
+                source_invocation=None if source["kind"] == "absent" else {"source_epoch": "epoch"},
+                creator=None
+                if source["kind"] == "absent"
+                else {"calcjob_uuid": c.selection["calcjob_uuid"], "binding_uuid": None},
+            )
+            points.append(point)
+            rows.append(
+                dict(
+                    id=name,
+                    attempt=9,
+                    coordinates=coords,
+                    data={"native_source": source},
+                    status="failed",
+                    quality="invalid",
+                    converged=False,
+                )
+            )
+        raw = json.dumps({"points": rows}, ensure_ascii=False, allow_nan=False).encode()
+        pin = dict(
+            node_uuid=BINDING_UUID, bytes=str(len(raw)), sha256=hashlib.sha256(raw).hexdigest()
+        )
+        binding = {
+            **c.dto["binding"],
+            "points": points,
+            "attempt_history": [],
+            "input_plan": deepcopy(pin),
+            "source_graph": deepcopy(pin),
+            "raw_result": {k: pin[k] for k in ("bytes", "sha256")},
+        }
+        c.catalog = dict(
+            status="available",
+            point=None,
+            binding=binding,
+            result_utf8=raw.decode(),
+            native_result=pin,
+            native_binding=deepcopy(pin),
+            integrity=c.dto["integrity"],
+            declared_points=declared,
+        )
+        c.catalog_calls = []
+
+        def getter(*args, **kwargs):
+            assert kwargs["point_id"] is None
+            assert kwargs["binding_uuid"] in (None, BINDING_UUID)
+            c.catalog_calls.append(kwargs)
+            return deepcopy(c.catalog)
+
+        c.adapter.service.get_native_result_source = getter
+        return c
+
+    return make
+
+
+def catalog_read(case, operation="sources", query=None):
+    return asyncio.run(case.adapter.read(operation, case.selection, query or {}))
+
+
+def test_R1_catalog_one_owner_preserves_declared_gaps_and_finite_page(catalog_case):
+    c = catalog_case()
+    c.adapter.worker = lambda *a: pytest.fail("metadata opened child")
+    value = catalog_read(c, query={"limit": 3})
+    assert len(c.catalog_calls) == 1 and value["schema"] == "qcl-negf.portal-native-sources.v1"
+    assert [p["point_id"] for p in value["points"]] == ["p0", "p1", "p2"]
+    assert (
+        value["points"][0]["declared_coordinates"]["voltage_per_period_V"]["bits"]
+        == "8000000000000000"
+    )
+    tail = catalog_read(c, query={"cursor": value["pagination"]["next_cursor"]})
+    assert [p["point_id"] for p in tail["points"]] == ["p3", "p4"]
+    assert tail["points"][-1]["row_status"] == "not_recorded"
+    assert (
+        tail["points"][-1]["source"] is None
+        and tail["points"][-1]["missing_reason"] == "result_row_absent"
+    )
+
+
+def test_R1_page_actual_public_briefs_have_assigned_epochs_and_gap_states(catalog_case):
+    c = catalog_case()
+    page = catalog_read(c)
+    value = catalog_read(c, "brief", {"page_ref": page["pagination"]["page_ref"]})
+    assert len(c.catalog_calls) == 2
+    assert [p["read"]["status"] for p in value["points"]] == [
+        "available",
+        "available",
+        "absent",
+        "checkpoint_only",
+        "not_recorded",
+    ]
+    assert (
+        value["credits"]["stage_share"] == 33554432
+        and value["credits"]["reserved_bytes"] == 134217728
+    )
+    for p in value["points"][:2]:
+        assert p["view"]["source_state"] == p["source_state"]
+        assert p["view"]["limits"]["maximum_io_bytes"] == 33554432
+        assert (
+            p["view"]["scalar_observables"]["current_density_A_per_m2"]["bits"]
+            == "8000000000000000"
+        )
+    assert all(p["view"] is None and p["access"] is None for p in value["points"][2:])
+
+
+def test_R1_huge_uncomputed_declarations_are_exact_before_json(catalog_case):
+    c = catalog_case(finals=0, gaps=False, declared_count=260, huge=True)
+    c.adapter.binding = None
+    c.adapter.worker = lambda *a: pytest.fail("uncomputed page opened child")
+    page = catalog_read(c)
+    coordinate = page["points"][0]["declared_coordinates"]
+    assert coordinate["temperature_K"] == {"kind": "json_integer", "decimal": str(10**2000)}
+    assert coordinate["order"] == str(10**2000)
+    brief = catalog_read(c, "brief", {"page_ref": page["pagination"]["page_ref"]})
+    assert brief["credits"]["final_sources"] == 0 and all(
+        p["view"] is None for p in brief["points"]
+    )
+
+
+@pytest.mark.parametrize("n", [0, 1, 2, 8])
+def test_R1_page_public_reader_counts_close_and_numeric_payload(
+    catalog_case, monkeypatch, n, record_property
+):
+    import os
+
+    import h5py
+    from qcl_negf_results.state import StateReader
+
+    c = catalog_case(finals=n, gaps=False)
+    active = set()
+    maximum = 0
+    original_init = StateReader.__init__
+    original_close = StateReader.close
+
+    def init(self, *args, **kwargs):
+        nonlocal maximum
+        original_init(self, *args, **kwargs)
+        active.add(id(self))
+        maximum = max(maximum, len(active))
+
+    def close(self):
+        try:
+            return original_close(self)
+        finally:
+            active.discard(id(self))
+
+    monkeypatch.setattr(StateReader, "__init__", init)
+    monkeypatch.setattr(StateReader, "close", close)
+    original_get = h5py.Dataset.__getitem__
+
+    def get(dataset, key):
+        assert dataset.dtype.kind not in "biufc", dataset.name
+        return original_get(dataset, key)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", get)
+    page = catalog_read(c)
+    before = len(os.listdir("/proc/self/fd"))
+    value = catalog_read(c, "brief", {"page_ref": page["pagination"]["page_ref"]})
+    assert len(c.catalog_calls) == 2 and not active and maximum == (1 if n else 0)
+    assert before == len(os.listdir("/proc/self/fd"))
+    credits = value["credits"]
+    assert credits["final_sources"] == n
+    assert credits["reserved_bytes"] <= 128 * 1024 * 1024
+    assert credits["actual_delivered_bytes"] == sum(
+        e["initialization"]["bytes_read_total"] + e["brief_and_close"]["bytes_read_total"]
+        for e in credits["epochs"]
+    )
+    assert all(
+        e["initialization"]["maximum_io_bytes"]
+        == e["brief_and_close"]["maximum_io_bytes"]
+        == credits["stage_share"]
+        for e in credits["epochs"]
+    )
+    record_property("r1_page_epochs", json.dumps(credits))
+
+
+def _catalog_repin(case):
+    """Independent raw selected-row mirror for malformed-source controls."""
+    rows = []
+    for p in case.catalog["binding"]["points"]:
+        rows.append(
+            dict(
+                id=p["point_id"],
+                attempt=p["point_attempt"],
+                coordinates=p["coordinates"],
+                data={"native_source": p["source"]},
+                status="failed",
+                quality="invalid",
+                converged=False,
+            )
+        )
+    raw = json.dumps({"points": rows}, allow_nan=False).encode()
+    case.catalog["result_utf8"] = raw.decode()
+    pin = {"bytes": str(len(raw)), "sha256": hashlib.sha256(raw).hexdigest()}
+    case.catalog["binding"]["raw_result"] = pin
+    case.catalog["native_result"].update(pin)
+
+
+@pytest.mark.parametrize(
+    "phase", ["initialization", "brief", "close", "second_source", "domain_after_close"]
+)
+def test_R1_admitted_page_failure_has_no_partial_answer(catalog_case, monkeypatch, phase):
+    from dataclasses import replace
+
+    from qcl_negf_contracts.messages import ContractError
+    from qcl_negf_results.saved_views import AnalysisReader
+    from qcl_negf_results.state import StateReader
+
+    from qcl_negf_api import saved_nfs
+
+    c = catalog_case(finals=2, gaps=False)
+    if phase == "second_source":
+        c.catalog["binding"]["points"][1]["source"]["observations"]["sha256"] = "0" * 64
+        _catalog_repin(c)
+    page = catalog_read(c)
+    if phase == "initialization":
+        monkeypatch.setattr(saved_nfs, "PAGE_IO", 4)
+    if phase == "brief":
+        original = AnalysisReader.brief
+
+        def low(self):
+            self.limits = replace(self.limits, maximum_io_bytes=1)
+            return original(self)
+
+        monkeypatch.setattr(AnalysisReader, "brief", low)
+    if phase == "close":
+        original = StateReader.close
+
+        def failed_close(self):
+            original(self)
+            raise ContractError("synthetic close credit failure", "budget_exceeded")
+
+        monkeypatch.setattr(StateReader, "close", failed_close)
+    if phase == "domain_after_close":
+        original = StateReader.close
+
+        def changed(self):
+            original(self)
+            old = c.data / "p0"
+            if old.exists():
+                old.rename(c.data / "old-p0")
+                old.mkdir()
+
+        monkeypatch.setattr(StateReader, "close", changed)
+    with pytest.raises((SavedResultError, ContractError)):
+        catalog_read(c, "brief", {"page_ref": page["pagination"]["page_ref"]})
+
+
+@pytest.mark.parametrize("field", ["native_result", "native_binding", "input_plan", "source_graph"])
+def test_R1_changed_original_page_pin_refuses_before_spool(catalog_case, field):
+    c = catalog_case()
+    page = catalog_read(c)
+    pin = c.catalog[field] if field in c.catalog else c.catalog["binding"][field]
+    pin["node_uuid"] = "77777777-7777-4777-8777-777777777777"
+    c.adapter.worker = lambda *a: pytest.fail("changed pin opened child")
+    with pytest.raises(SavedResultError, match="source_changed"):
+        catalog_read(c, "brief", {"page_ref": page["pagination"]["page_ref"]})
+
+
+def test_R1_all_original_creators_and_coordinates_checked_before_page_child(catalog_case):
+    c = catalog_case()
+    page = catalog_read(c, query={"limit": 1})
+    c.catalog["binding"]["points"][-1]["creator"]["calcjob_uuid"] = "foreign"
+    c.adapter.worker = lambda *a: pytest.fail("foreign creator outside page opened child")
+    with pytest.raises(SavedResultError):
+        catalog_read(c, "brief", {"page_ref": page["pagination"]["page_ref"]})
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"limit": 0},
+        {"limit": True},
+        {"limit": 9},
+        {"cursor": "x"},
+        {"limit": 2, "cursor": "x"},
+        {"point_id": "p0"},
+        {"cursor": "x" * 8193},
+    ],
+)
+def test_R1_invalid_page_query_has_zero_owner_calls(catalog_case, query):
+    c = catalog_case(finals=0, gaps=False)
+    with pytest.raises(SavedResultError, match="selection_required"):
+        catalog_read(c, query=query)
+    assert c.catalog_calls == []
+
+
+def test_R1_native_row_u64_counter_is_exact_and_separate(catalog_case):
+    c = catalog_case(finals=0, gaps=True)
+    c.catalog["binding"]["points"][0]["point_attempt"] = 2**64 - 1
+    _catalog_repin(c)
+    page = catalog_read(c)
+    assert page["points"][0]["point_attempt"] == "18446744073709551615"
+    assert page["provider_selection"]["attempt"] == 2
+
+
+def test_R1_declared_integer_and_recorded_float_keep_own_binary64_join(catalog_case):
+    c = catalog_case(finals=0, gaps=True)
+    c.catalog["declared_points"][0]["temperature_K"] = 200
+    page = catalog_read(c)
+    assert page["points"][0]["declared_coordinates"]["temperature_K"] == {
+        "kind": "json_integer",
+        "decimal": "200",
+    }
+    c.catalog["declared_points"][0]["voltage_per_period_V"] = 0
+    with pytest.raises(SavedResultError, match="identity_mismatch"):
+        catalog_read(c)
+
+
+def test_R1_actual_actor_forwards_None_once_for_each_page_request(catalog_case, monkeypatch):
+    import aiida
+    import aiida.manage
+    import aiida_qcl_negf.service as owner
+
+    from qcl_negf_api.service import AiidaService
+
+    c = catalog_case(finals=0, gaps=False)
+    events = []
+    monkeypatch.setattr(
+        aiida, "load_profile", lambda profile: events.append(("load", threading.get_ident()))
+    )
+    monkeypatch.setattr(
+        aiida.manage,
+        "get_manager",
+        lambda: SimpleNamespace(
+            unload_profile=lambda: events.append(("unload", threading.get_ident()))
+        ),
+    )
+
+    def getter(run, execution, **kwargs):
+        assert kwargs["point_id"] is None
+        assert kwargs["binding_uuid"] in (None, BINDING_UUID)
+        events.append(("getter", threading.get_ident()))
+        return deepcopy(c.catalog)
+
+    monkeypatch.setattr(owner, "get_native_result_source", getter)
+    actor = AiidaService("synthetic-R1")
+    c.adapter.service = actor
+    try:
+        page = catalog_read(c)
+        catalog_read(c, "brief", {"page_ref": page["pagination"]["page_ref"]})
+    finally:
+        actor.close()
+    assert [e[0] for e in events] == ["load", "getter", "getter", "unload"]
+    assert len({e[1] for e in events}) == 1 and events[0][1] != threading.get_ident()
+
+
 def test_manifest_native_view_dictionary_preserves_separate_transport_and_native_identity(
     native_case, monkeypatch
 ):
@@ -213,8 +624,8 @@ def test_slice_actual_native_negative_zero_nonfinite_and_axes(native_case):
 
 
 @pytest.mark.parametrize("operation", ["brief", "sources"])
-def test_open_execution_wide_producer_never_uses_legacy_fallback(native_case, operation):
-    with pytest.raises(SavedResultError, match="unsupported_contract"):
+def test_execution_page_rejects_single_point_query_without_legacy_fallback(native_case, operation):
+    with pytest.raises(SavedResultError, match="selection_required"):
         read(native_case, operation)
     assert native_case.calls == []
 
@@ -392,17 +803,21 @@ def test_metadata_rejects_foreign_malformed_and_unbounded_owner_dto(native_case,
         assert caught.value.code == "budget_exceeded"
 
 
+@pytest.mark.parametrize("operation", ["point-source", "sources"])
 @pytest.mark.parametrize("stop", ["cancel", "disconnect", "deadline"])
 def test_metadata_cancel_keeps_actual_pending_getter_and_quarantines(
-    native_case, monkeypatch, stop
+    native_case, catalog_case, monkeypatch, stop, operation
 ):
+    if operation == "sources":
+        native_case = catalog_case(finals=0, gaps=False)
+    query = {"point_id": "point"} if operation == "point-source" else {}
     entered, release = threading.Event(), threading.Event()
 
     def getter(*args, **kwargs):
         assert kwargs["binding_uuid"] is None
         entered.set()
         release.wait(2)
-        return deepcopy(native_case.dto)
+        return deepcopy(native_case.dto if operation == "point-source" else native_case.catalog)
 
     native_case.adapter.service.get_native_result_source = getter
     native_case.adapter.cleanup_seconds = 0.02
@@ -414,9 +829,7 @@ def test_metadata_cancel_keeps_actual_pending_getter_and_quarantines(
 
     async def run():
         task = asyncio.create_task(
-            native_case.adapter.read(
-                "point-source", native_case.selection, {"point_id": "point"}, disconnected
-            )
+            native_case.adapter.read(operation, native_case.selection, query, disconnected)
         )
         for _ in range(100):
             if entered.is_set():
@@ -424,9 +837,7 @@ def test_metadata_cancel_keeps_actual_pending_getter_and_quarantines(
             await asyncio.sleep(0.005)
         assert entered.is_set()
         with pytest.raises(SavedResultError, match="busy"):
-            await native_case.adapter.read(
-                "point-source", native_case.selection, {"point_id": "point"}
-            )
+            await native_case.adapter.read(operation, native_case.selection, query)
         if stop == "cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -439,9 +850,7 @@ def test_metadata_cancel_keeps_actual_pending_getter_and_quarantines(
                 await task
         assert native_case.adapter.closed and native_case.adapter.busy
         with pytest.raises(SavedResultError, match="stopping"):
-            await native_case.adapter.read(
-                "point-source", native_case.selection, {"point_id": "point"}
-            )
+            await native_case.adapter.read(operation, native_case.selection, query)
         release.set()
         for _ in range(100):
             if native_case.adapter.active is None:
@@ -463,11 +872,13 @@ def test_metadata_refresh_uses_actual_actor_owner_thread_with_none_expectation(
     import aiida
     import aiida.manage
     import aiida_qcl_negf.service as owner
+
     from qcl_negf_api.service import AiidaService
 
     assert (
         Path(owner.__file__).resolve()
-        == Path(__file__).resolve().parents[2] / "p07-b-credit-aiida/src/aiida_qcl_negf/service.py"
+        == Path(__file__).resolve().parents[2]
+        / "p09-r1-catalog-aiida/src/aiida_qcl_negf/service.py"
     )
     events = []
     monkeypatch.setattr(

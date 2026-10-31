@@ -346,9 +346,6 @@ class SavedResults:
             from .live_nfs import perform
 
             return perform(self, operation, selection, query, cancelled, deadline, check)
-        if operation in {"sources", "brief"}:
-            # R1 requires its owning native execution-wide producer.
-            raise SavedResultError("unsupported_contract")
         # point-source shares the actual future/gate but returns before any RO child.
         from .saved_nfs import native_perform
 

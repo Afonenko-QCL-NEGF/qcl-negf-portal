@@ -118,9 +118,16 @@ retained-source reason/creator сохраняют исходный смысл. N
 старые data/cursor, запоздалые success/error отбрасываются. См.
 [saved-results.md](docs/saved-results.md) для exact route/DTO и lifetime limits.
 
-Execution-wide brief/current/retrieved/performance producers, derive/comparison,
-actual used-value help и installed/browser/native/scientific gates остаются
-отдельными OPEN задачами. Историческая binding integrity и getter readback
+Execution-wide каталог/J(V) теперь читается вручную конечными страницами через
+published owning None-catalog и public native brief. Необсчитанные точки, исходные
+branch/order, exact decimal declarations, IEEE signed/nonfinite scalars и отдельные
+scientific statuses сохраняются; ordinary run poll не запускает page reads.
+Один isolated child читает только final sources выбранной страницы с prepaid
+constructor + brief/close I/O shares. См. [saved-results.md](docs/saved-results.md).
+
+Current/retrieved/performance producers, derive/comparison, actual used-value help
+и installed/browser/native/scientific gates остаются отдельными OPEN задачами.
+Историческая binding integrity и getter readback
 limitations различаются; RO-наблюдение относится только к отдельному read request.
 
 ## HTTP API

@@ -2,6 +2,51 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {cellEdges,displayScale,readManifest,readSlice,readNativeEnvelope,nativePin,SavedSession,selectionOptions} from '../src/saved-results-data.ts';
 import type {NativeContext,StateRef} from '../src/saved-results-data.ts';
+import {readSources,readBrief,ieeeCell,declaredText,catalogChoice} from '../src/saved-results-data.ts';
+import type {SourcesPage,BriefPage} from '../src/saved-results-data.ts';
+
+export function catalogFixture(){
+ const f=nativeFixture(),observations={path:'observations.h5',bytes:'100',sha256:'e'.repeat(64),schema:'qcl-negf-physics-analysis-v5',media_type:'application/x-hdf5'};
+ const retained={native_result:f.pin,native_binding:f.pin,input_plan:f.pin,source_graph:f.pin,integrity:f.response.retained.integrity};
+ const row={point_id:'point',declared_coordinates:{temperature_K:{kind:'json_integer',decimal:'1'+'0'.repeat(2000)},voltage_per_period_V:{kind:'ieee',type:'f64',bits:'8000000000000000'},branch:'reverse',order:'1'+'0'.repeat(2000)},row_status:'recorded',point_attempt:'9',source:{kind:'final',relation:'current_point_attempt',reason:null},source_state:f.state,source_invocation:{source_epoch:'epoch'},observations_ref:observations,creator:{calcjob_uuid:f.selection.calcjob_uuid,binding_uuid:null},recorded_statuses:{status:'failed',quality:'invalid',converged:false},missing_reason:null};
+ const ordered=(v:unknown):unknown=>Array.isArray(v)?v.map(ordered):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b,'en')).map(([k,x])=>[k,ordered(x)])):v;
+ const token=Buffer.from(JSON.stringify(ordered({schema:'qcl-negf.portal-native-page.v1',provider_selection:f.selection,...Object.fromEntries(['native_result','native_binding','input_plan','source_graph'].map(k=>[k,f.pin])),offset:'0',limit:8}))).toString('base64url');
+ const page={schema:'qcl-negf.portal-native-sources.v1',scope:'original_owner_metadata',provider_selection:f.selection,retained,pagination:{offset:'0',limit:8,total:'1',page_ref:token,previous_cursor:null,next_cursor:null},points:[row]} as unknown as SourcesPage;
+ const counter={bytes_read_total:10,sha_bytes:0,hdf_bytes:0,metadata_bytes:10,logical_selected_bytes:0,maximum_io_bytes:67108864};
+ const view={source_state:f.state,identity:f.state.identity,invocation:row.source_invocation,artifact_ref:observations,request:{coordinate_checks:{voltage:{actual:{kind:'ieee',type:'f64',bits:'3fa999999999999a'}},temperature:{actual:{kind:'ieee',type:'f64',bits:'4069000000000000'}}}},scalar_observables:{current_density_A_per_m2:{kind:'ieee',type:'f64',bits:'8000000000000000'},sheet_density_per_m2:null},summary:{scientific_accepted:null,discretization_verified:'not_measured',status:'invalid'},issues:[]};
+ const brief={...page,schema:'qcl-negf.portal-native-brief.v1',points:[{...row,read:{status:'available',reason:null},access:f.response.access,view}],credits:{final_sources:1,stage_share:67108864,reserved_bytes:134217728,actual_delivered_bytes:20,epochs:[{point_id:'point',initialization:counter,brief_and_close:counter}]}} as unknown as BriefPage;
+ return {page,brief,f};
+}
+test('R1 exact finite page keeps 2001-digit declarations and signed IEEE before native brief',()=>{
+ const {page,brief,f}=catalogFixture();const p=readSources(page,f.selection);assert.equal(declaredText(p.points[0].declared_coordinates.temperature_K),'1'+'0'.repeat(2000));assert.equal(p.points[0].declared_coordinates.order.length,2001);
+ const b=readBrief(brief,p);assert.equal(ieeeCell(b.points[0].view!.scalar_observables.current_density_A_per_m2).text,'-0');
+ assert.equal(ieeeCell(b.points[0].view!.request.coordinate_checks.voltage.actual).value,.05);
+ for(const bad of [{...page,extra:true},{...page,points:[]},{...page,pagination:{...page.pagination,total:'01'}},{...page,pagination:{...page.pagination,page_ref:page.pagination.page_ref+'='}}])assert.throws(()=>readSources(bad,f.selection));
+});
+test('R1 full source, invocation, all five O1 fields and source order are pinned to metadata',()=>{
+ const {page,brief}=catalogFixture();
+ for(const key of ['path','bytes','sha256','schema','media_type']){const b=structuredClone(brief);(b.points[0].view!.artifact_ref as unknown as Record<string,unknown>)[key]='foreign';assert.throws(()=>readBrief(b,page),key);}
+ for(const field of Object.keys(page.points[0].source_state!.identity)){const b=structuredClone(brief);(b.points[0].view!.identity as unknown as Record<string,unknown>)[field]='foreign';assert.throws(()=>readBrief(b,page),field);}
+ for(const mutate of [(b:BriefPage)=>b.points[0].view!.invocation.source_epoch='foreign',(b:BriefPage)=>b.points[0].view!.source_state.state_id='foreign',(b:BriefPage)=>b.points[0].view!.source_state.state_sequence='2',(b:BriefPage)=>b.points[0].view!.source_state.manifest.bytes='101',(b:BriefPage)=>b.points[0].point_id='foreign']){const b=structuredClone(brief);mutate(b);assert.throws(()=>readBrief(b,page));}
+});
+test('R1 scalar codec retains raw finite extremes, zero, infinities, NaN payload and null',()=>{
+ const values=[['0000000000000000','0'],['8000000000000000','-0'],['c008000000000000','-3'],['0000000000000001','5e-324'],['7fefffffffffffff','1.7976931348623157e+308'],['7ff0000000000000','positive_infinity'],['fff0000000000000','negative_infinity'],['7ff8000000000042','nan']];
+ for(const [bits,text] of values){const raw={kind:'ieee',type:'f64',bits};const cell=ieeeCell(raw);assert.equal(cell.text,text);assert.deepEqual(cell.raw,raw);if(['nan','positive_infinity','negative_infinity'].includes(text))assert.equal(cell.value,null);}
+ assert.equal(ieeeCell(null).reason,'missing_scalar');for(const bits of ['8000','7FF0000000000000','0000000000000000\n'])assert.throws(()=>ieeeCell({kind:'ieee',type:'f64',bits}));
+});
+test('R1 admitted native row u64 maximum stays a decimal string distinct from transport/StateRef counters',()=>{
+ const {page,f}=catalogFixture();page.points[0].point_attempt='18446744073709551615';page.points[0].source_state!.identity.attempt='1';
+ const read=readSources(page,f.selection);assert.equal(read.points[0].point_attempt,'18446744073709551615');assert.equal(read.points[0].source_state!.identity.attempt,'1');assert.equal(read.provider_selection.attempt,2);
+});
+test('R1 catalog choice ignores poll mtime and fences every selected tuple/removal change',()=>{
+ const {f}=catalogFixture();const run={uuid:f.selection.run_uuid,children:[{uuid:f.selection.calcjob_uuid,execution_id:'exec',attempt:2}]} as never;
+ const key=catalogChoice('token',run,f.selection.calcjob_uuid).key;assert.equal(catalogChoice('token',{...run as object,mtime:'poll'} as never,f.selection.calcjob_uuid).key,key);
+ for(const [token,next] of [['new',run],['token',{...run as object,uuid:f.selection.calcjob_uuid}],['token',{...run as object,children:[]}],['token',{...run as object,children:[{uuid:f.selection.calcjob_uuid,execution_id:'other',attempt:2}]}],['token',{...run as object,children:[{uuid:f.selection.calcjob_uuid,execution_id:'exec',attempt:3}]}]] as const)assert.notEqual(catalogChoice(token,next as never,f.selection.calcjob_uuid).key,key);
+});
+test('R1 brief source order cannot be substituted by the same set of states',()=>{
+ const {page,brief}=catalogFixture();const p2=structuredClone(page.points[0]);p2.point_id='point2';p2.source_state!.identity.point_id='point2';page.points.push(p2);page.pagination.total='2';
+ const b2=structuredClone(brief.points[0]);Object.assign(b2,p2);b2.view!.identity.point_id='point2';b2.view!.source_state.identity.point_id='point2';brief.points.push(b2);brief.pagination=page.pagination;brief.points.reverse();assert.throws(()=>readBrief(brief,page));
+});
 export function nativeFixture(){
  const state:StateRef={identity:{run_id:'native',execution_id:'exec',point_id:'point',attempt:'18446744073709551615',branch_id:'branch',model_sha256:'b'.repeat(64),plan_sha256:'c'.repeat(64)},state_id:'state',state_sequence:'7',manifest:{path:'state.json',bytes:'12',sha256:'a'.repeat(64),schema:'qcl-negf.result-manifest.v1',media_type:'application/json'}};
  const selection={run_uuid:'11111111-1111-4111-8111-111111111111',execution_id:'exec',attempt:2,calcjob_uuid:'22222222-2222-4222-8222-222222222222'};

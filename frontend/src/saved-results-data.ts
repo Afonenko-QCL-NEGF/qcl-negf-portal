@@ -98,3 +98,91 @@ export class SavedSession {
  private serial=0;invalidate(){this.serial++;}begin(){return ++this.serial;}current(id:number){return id===this.serial;}
  async receive(id:number,load:()=>Promise<unknown>,success:(v:unknown)=>void,failure:(e:unknown)=>void){try{const v=await load();if(this.current(id))success(v);}catch(e){if(this.current(id))failure(e);}}
 }
+
+export interface NodePin {node_uuid:string;bytes:string;sha256:string}
+export interface IEEE64 {kind:'ieee';type:'f64';bits:string}
+export type DeclaredNumber=IEEE64|{kind:'json_integer';decimal:string};
+export interface CatalogPoint {point_id:string;declared_coordinates:{temperature_K:DeclaredNumber;voltage_per_period_V:DeclaredNumber;branch:string;order:string};row_status:'recorded'|'not_recorded';point_attempt:string|null;source:{kind:'absent'|'checkpoint'|'final';relation:string|null;reason:string|null}|null;source_state:StateRef|null;source_invocation:{source_epoch:string}|null;observations_ref:FileRef|null;creator:{calcjob_uuid:string;binding_uuid:string|null}|null;recorded_statuses:{status:string|null;quality:string|null;converged:boolean|null};missing_reason:string|null}
+export interface SourcesPage {schema:'qcl-negf.portal-native-sources.v1';scope:'original_owner_metadata';provider_selection:SavedSelection;retained:{native_result:NodePin;native_binding:NodePin;input_plan:NodePin;source_graph:NodePin;integrity:NativeEnvelope['retained']['integrity']};pagination:{offset:string;limit:number;total:string;page_ref:string;previous_cursor:string|null;next_cursor:string|null};points:CatalogPoint[]}
+export interface NativeBrief extends Record<string,unknown> {source_state:StateRef;identity:StateRef['identity'];invocation:{source_epoch:string};artifact_ref:FileRef;request:{coordinate_checks:{voltage:{actual:IEEE64|null};temperature:{actual:IEEE64|null}}};scalar_observables:{current_density_A_per_m2:IEEE64|null;sheet_density_per_m2:IEEE64|null};summary:Record<string,unknown>;issues:Record<string,unknown>[]}
+export interface BriefPoint extends CatalogPoint {read:{status:'available'|'not_recorded'|'absent'|'checkpoint_only';reason:string|null};access:Record<string,unknown>|null;view:NativeBrief|null}
+export interface BriefPage extends Omit<SourcesPage,'schema'|'points'> {schema:'qcl-negf.portal-native-brief.v1';points:BriefPoint[];credits:{final_sources:number;stage_share:number;reserved_bytes:number;actual_delivered_bytes:number;epochs:Record<string,unknown>[]}}
+const decimal=(v:unknown,signed=false):v is string=>typeof v==='string'&&(signed?/^(0|-?[1-9][0-9]*)(?![\s\S])/:/^(0|[1-9][0-9]*)(?![\s\S])/).test(v);
+function fileRef(value:unknown):asserts value is FileRef {
+ requireNative(object(value)&&exactKeys(value,'path,bytes,sha256,schema,media_type')&&count(value.bytes)&&hash(value.sha256)&&typeof value.path==='string'&&value.path.length>0&&value.path.length<=1024&&!/[\\\0:]/.test(value.path)&&value.path.split('/').every(p=>p!==''&&p!=='.'&&p!=='..')&&typeof value.schema==='string'&&value.schema.length>0&&typeof value.media_type==='string'&&value.media_type.length>0);
+}
+function ieee(value:unknown):asserts value is IEEE64 {requireNative(object(value)&&exactKeys(value,'kind,type,bits')&&value.kind==='ieee'&&value.type==='f64'&&typeof value.bits==='string'&&/^[0-9a-f]{16}(?![\s\S])/.test(value.bits));}
+function declared(value:unknown):asserts value is DeclaredNumber {if(object(value)&&value.kind==='json_integer')requireNative(exactKeys(value,'kind,decimal')&&decimal(value.decimal,true));else ieee(value);}
+export function ieeeCell(value:unknown){
+ if(value===null)return {value:null,reason:'missing_scalar',text:'missing_scalar',raw:null};
+ ieee(value);const bytes=Uint8Array.from(value.bits.match(/../g)!,v=>parseInt(v,16)),number=new DataView(bytes.buffer).getFloat64(0,false);
+ const reason=Number.isNaN(number)?'nan':number===Infinity?'positive_infinity':number===-Infinity?'negative_infinity':null;
+ return {value:reason===null?number:null,reason,text:reason??(Object.is(number,-0)?'-0':String(number)),raw:value};
+}
+export function declaredText(value:DeclaredNumber){return value.kind==='json_integer'?value.decimal:ieeeCell(value).text;}
+export function catalogChoice(token:string,run:Pick<Run,'uuid'|'children'|'plan_fingerprint'>,job:string){
+ const selection=selectionOptions(run).find(s=>s.calcjob_uuid===job);
+ return {selection,key:JSON.stringify([token,run.uuid,run.plan_fingerprint??null,job,selection??null])};
+}
+export function catalogRequest(selection:SavedSelection,query:{limit?:number;cursor?:string;page_ref?:string}={}){
+ const {point_id:_,...exact}=pointRequest(selection,'catalog');return {...exact,...query};
+}
+function sortedJSON(v:unknown):string {if(Array.isArray(v))return '['+v.map(sortedJSON).join(',')+']';if(object(v))return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+sortedJSON(v[k])).join(',')+'}';return JSON.stringify(v);}
+function pageToken(token:unknown,page:SourcesPage,offset:string){
+ requireNative(typeof token==='string'&&token.length<=2731&&/^[A-Za-z0-9_-]+(?![\s\S])/.test(token));
+ const bytes=Uint8Array.from(atob(token.replaceAll('-','+').replaceAll('_','/')),c=>c.charCodeAt(0));requireNative(bytes.length<=2048);
+ const raw=new TextDecoder('utf-8',{fatal:true}).decode(bytes),v=JSON.parse(raw);
+ const expected={schema:'qcl-negf.portal-native-page.v1',provider_selection:page.provider_selection,native_result:page.retained.native_result,native_binding:page.retained.native_binding,input_plan:page.retained.input_plan,source_graph:page.retained.source_graph,offset,limit:page.pagination.limit};
+ requireNative(sameValue(v,expected)&&raw===sortedJSON(v));
+}
+export function readSources(value:unknown,selection:SavedSelection,cursor?:string):SourcesPage {
+ boundedNative(value);catalogRequest(selection);
+ requireNative(object(value)&&exactKeys(value,'schema,scope,provider_selection,retained,pagination,points')&&value.schema==='qcl-negf.portal-native-sources.v1'&&value.scope==='original_owner_metadata'&&sameValue(value.provider_selection,selection));
+ const page=value as unknown as SourcesPage;retainedDTO(page.retained);
+ requireNative(exactKeys(page.retained as unknown as Record<string,unknown>,'native_result,native_binding,input_plan,source_graph,integrity')&&exactKeys(page.retained.integrity,'readback,original_binding'));
+ for(const key of ['input_plan','source_graph'] as const){const pin=page.retained[key];requireNative(object(pin)&&exactKeys(pin,'node_uuid,bytes,sha256')&&uuid(pin.node_uuid)&&count(pin.bytes)&&hash(pin.sha256));}
+ const p=page.pagination;requireNative(object(p)&&exactKeys(p,'offset,limit,total,page_ref,previous_cursor,next_cursor')&&count(p.offset)&&count(p.total)&&Number.isSafeInteger(p.limit)&&p.limit>=1&&p.limit<=8&&BigInt(p.offset)<=BigInt(p.total)&&(p.total==='0'?p.offset==='0':BigInt(p.offset)<BigInt(p.total))&&Array.isArray(page.points));
+ const remaining=BigInt(p.total)-BigInt(p.offset);requireNative(page.points.length===Number(remaining<BigInt(p.limit)?remaining:BigInt(p.limit)));
+ pageToken(p.page_ref,page,p.offset);if(cursor!==undefined)requireNative(p.page_ref===cursor);else requireNative(p.offset==='0');
+ if(p.offset==='0')requireNative(p.previous_cursor===null);else pageToken(p.previous_cursor,page,String(BigInt(p.offset)>BigInt(p.limit)?BigInt(p.offset)-BigInt(p.limit):0n));
+ if(BigInt(p.offset)+BigInt(p.limit)>=BigInt(p.total))requireNative(p.next_cursor===null);else pageToken(p.next_cursor,page,String(BigInt(p.offset)+BigInt(p.limit)));
+ const seen=new Set<string>();
+ for(const row of page.points){
+  requireNative(object(row)&&exactKeys(row,'point_id,declared_coordinates,row_status,point_attempt,source,source_state,source_invocation,observations_ref,creator,recorded_statuses,missing_reason')&&portable(row.point_id)&&!seen.has(row.point_id));seen.add(row.point_id);
+  const d=row.declared_coordinates;requireNative(object(d)&&exactKeys(d,'temperature_K,voltage_per_period_V,branch,order')&&typeof d.branch==='string'&&decimal(d.order));declared(d.temperature_K);declared(d.voltage_per_period_V);
+  const status=row.recorded_statuses;requireNative(object(status)&&exactKeys(status,'status,quality,converged')&&(status.status===null||typeof status.status==='string')&&(status.quality===null||typeof status.quality==='string')&&(status.converged===null||typeof status.converged==='boolean'));
+  if(row.row_status==='not_recorded')requireNative(row.point_attempt===null&&row.source===null&&row.source_state===null&&row.source_invocation===null&&row.creator===null&&row.observations_ref===null&&row.missing_reason==='result_row_absent'&&Object.values(status).every(v=>v===null));
+  else {
+   requireNative(row.row_status==='recorded'&&count(row.point_attempt,true)&&row.missing_reason===null&&object(row.source)&&exactKeys(row.source,'kind,relation,reason'));
+   const source=row.source;
+   if(source.kind==='absent')requireNative(row.source_state===null&&row.source_invocation===null&&row.creator===null&&row.observations_ref===null&&source.relation===null&&typeof source.reason==='string'&&source.reason.length>0);
+   else {
+    requireNative((source.kind==='checkpoint'||source.kind==='final')&&['current_point_attempt','retained_source'].includes(String(source.relation))&&((source.kind==='final'&&source.relation==='current_point_attempt')?source.reason===null:typeof source.reason==='string'&&source.reason.length>0));
+    stateRef(row.source_state);requireNative(row.source_state.identity.execution_id===selection.execution_id&&row.source_state.identity.point_id===row.point_id);
+    requireNative(object(row.source_invocation)&&exactKeys(row.source_invocation,'source_epoch')&&typeof row.source_invocation.source_epoch==='string'&&row.source_invocation.source_epoch.length>0&&object(row.creator)&&exactKeys(row.creator,'calcjob_uuid,binding_uuid')&&uuid(row.creator.calcjob_uuid)&&(row.creator.binding_uuid===null||uuid(row.creator.binding_uuid))&&((row.creator.calcjob_uuid===selection.calcjob_uuid)===(row.creator.binding_uuid===null)));
+    if(source.kind==='final')fileRef(row.observations_ref);else requireNative(row.observations_ref===null);
+   }
+  }
+ }
+ return page;
+}
+export function readBrief(value:unknown,page:SourcesPage):BriefPage {
+ boundedNative(value);requireNative(object(value)&&exactKeys(value,'schema,scope,provider_selection,retained,pagination,points,credits')&&value.schema==='qcl-negf.portal-native-brief.v1'&&Array.isArray(value.points)&&value.points.length===page.points.length);
+ const {credits,...base}=value;
+ const metadata={...base,schema:'qcl-negf.portal-native-sources.v1',points:value.points.map(row=>{requireNative(object(row)&&exactKeys(row,'point_id,declared_coordinates,row_status,point_attempt,source,source_state,source_invocation,observations_ref,creator,recorded_statuses,missing_reason,read,view,access'));const {read,view,access,...p}=row;return p;})};
+ readSources(metadata,page.provider_selection,page.pagination.page_ref);requireNative(sameValue(metadata,page));
+ let finals=0;
+ for(const raw of value.points){const row=raw as unknown as BriefPoint;const status=row.row_status==='not_recorded'?'not_recorded':row.source?.kind==='final'?'available':row.source?.kind==='checkpoint'?'checkpoint_only':'absent';
+  requireNative(object(row.read)&&exactKeys(row.read,'status,reason')&&row.read.status===status&&row.read.reason===(row.row_status==='not_recorded'?'result_row_absent':row.source?.reason));
+  if(status!=='available'){requireNative(row.view===null&&row.access===null);continue;}
+  finals++;const view=row.view;requireNative(object(view)&&sameValue(view.source_state,row.source_state)&&sameValue(view.identity,row.source_state?.identity)&&sameValue(view.invocation,row.source_invocation)&&sameValue(view.artifact_ref,row.observations_ref));
+  requireNative(object(row.access)&&exactKeys(row.access,'status,method,config_sha256')&&row.access.status==='checked_ro_current_request'&&row.access.method==='local_binding_mountinfo_nofollow_domain'&&hash(row.access.config_sha256));
+  requireNative(object(view.request)&&object(view.request.coordinate_checks)&&object(view.request.coordinate_checks.voltage)&&object(view.request.coordinate_checks.temperature)&&object(view.scalar_observables)&&object(view.summary)&&Array.isArray(view.issues));
+  ieeeCell(view.scalar_observables.current_density_A_per_m2);ieeeCell(view.scalar_observables.sheet_density_per_m2);ieeeCell(view.request.coordinate_checks.voltage.actual);ieeeCell(view.request.coordinate_checks.temperature.actual);
+ }
+ const share=finals?Math.floor(134217728/(2*finals)):0;
+ requireNative(object(credits)&&exactKeys(credits,'final_sources,stage_share,reserved_bytes,actual_delivered_bytes,epochs')&&credits.final_sources===finals&&credits.stage_share===share&&credits.reserved_bytes===2*finals*share&&Number.isSafeInteger(credits.actual_delivered_bytes)&&Number(credits.actual_delivered_bytes)>=0&&Number(credits.actual_delivered_bytes)<=Number(credits.reserved_bytes)&&Array.isArray(credits.epochs)&&credits.epochs.length===finals);
+ let measured=0;const names=value.points.filter(p=>(p as unknown as BriefPoint).read.status==='available').map(p=>(p as unknown as BriefPoint).point_id);
+ credits.epochs.forEach((epoch,i)=>{requireNative(object(epoch)&&exactKeys(epoch,'point_id,initialization,brief_and_close')&&epoch.point_id===names[i]);for(const phase of ['initialization','brief_and_close']){const c=epoch[phase];requireNative(object(c)&&exactKeys(c,'bytes_read_total,sha_bytes,hdf_bytes,metadata_bytes,logical_selected_bytes,maximum_io_bytes')&&Object.values(c).every(n=>Number.isSafeInteger(n)&&Number(n)>=0)&&c.maximum_io_bytes===share&&Number(c.bytes_read_total)<=share&&c.logical_selected_bytes===0&&c.bytes_read_total===Number(c.sha_bytes)+Number(c.hdf_bytes)+Number(c.metadata_bytes));measured+=Number(c.bytes_read_total);}});requireNative(measured===credits.actual_delivered_bytes);
+ return value as unknown as BriefPage;
+}

@@ -134,14 +134,98 @@ validation remain separate. GET and graphs do not run solve, derive or scientifi
 acceptance. Static or configurator preview data never replaces a retained used
 snapshot.
 
+## Execution-wide каталог и J(V)
+
+После явного выбора execution / transport attempt / CalcJob нажмите
+**«Прочитать каталог»**. Он включает frozen declared points, в том числе
+необсчитанные. Prev/next читают только выбранную страницу; **«Прочитать J(V) этой
+страницы»** отдельно читает её final sources. Начальный render и обычный неизменный
+run poll не читают каталог или NFS. Нет автоматического обхода всех страниц.
+
+```text
+GET /api/v1/runs/{run_uuid}/saved-results/sources
+    ?execution_id=exec&attempt=2&calcjob_uuid=<uuid>&limit=8
+GET /api/v1/runs/{run_uuid}/saved-results/sources
+    ?execution_id=exec&attempt=2&calcjob_uuid=<uuid>&cursor=<next_cursor>
+GET /api/v1/runs/{run_uuid}/saved-results/brief
+    ?execution_id=exec&attempt=2&calcjob_uuid=<uuid>&page_ref=<page_ref>
+```
+
+Bearer/no-store обязательны. Selectors canonical, execution portable, attempt —
+positive safe integer, UUID полные. Sources допускает либо limit1..8 (default8),
+либо cursor; brief требует page_ref. Лишние/повторные параметры, body и query>8192B
+дают 422 до owner dispatch. Cursor/page_ref — unpadded canonical base64url,
+duplicate-free closed JSON≤2048 decoded bytes: schema
+`qcl-negf.portal-native-page.v1`, provider_selection, genuine native_result,
+native_binding, input_plan, source_graph NodePins, u64 decimal offset и limit.
+Token не даёт authority: каждый request ровно один раз вызывает owning
+`get_native_result_source(...,point_id=None,binding_uuid=...)` и сверяет исходные
+pins. Изменение pin даёт source_changed409; нет legacy/first-point fallback.
+
+Closed `qcl-negf.portal-native-sources.v1` содержит scope=original_owner_metadata,
+provider_selection, retained four NodePins + раздельную integrity, pagination
+(offset/limit/total/page_ref/previous_cursor/next_cursor), points. CatalogPoint:
+point_id, declared_coordinates, row_status, point_attempt decimal|null,
+source kind/relation/reason|null, полный source_state, source_invocation,
+observations_ref, creator, recorded_statuses и missing_reason. Final
+observations_ref — **исходный полный O1 FileRef**, иначе null. Это read-only pin,
+не путь/разрешение доступа. Artifact root и полный binding/raw не выдаются.
+Row point_attempt сохраняет действующий owning u64 binder contract и передаётся
+точной decimal string, включая u64 max за пределом JS safe integer. Это отдельный
+counter от transport attempt и native StateRef.identity.attempt; между ними не
+вводится равенство или отношение порядка. Произвольный decimal без u64 cap ниже
+относится к declared T/V/order.
+
+Declared JSON integer T/V передаётся как `{kind:"json_integer",decimal:"..."}`,
+исходный float — неизменённый `{kind:"ieee",type:"f64",bits:"..."}`. Declared
+order — canonical nonnegative decimal string без нового u64/Int64/model cap;
+допустимость исходного числа устанавливает frozen scientific-plan schema.
+Произвольная integer declaration, включая 2001 digits, не преобразуется в
+JavaScript Number/Infinity. Общий JSON cap ограничивает размер, без truncation.
+Branch/order сохраняют исходный plan order. Declared coordinates **не** used
+snapshot и не заменяют actual O1 request coordinates.
+Join с recorded T/V повторяет owning binder binary64 bit comparison: например,
+frozen integer70 и recorded float70.0 сопоставимы по этому join, но declared
+integer tag сохраняется. Это проверка source relation, не физическая приёмка или
+доказательство сопоставимости разных расчётов; branch/order сравниваются точно.
+
+No result row — not_recorded/result_row_absent, без выдуманного native absent;
+recorded absent и checkpoint сохраняют исходные причины и StateRef. Closed
+`qcl-negf.portal-native-brief.v1` повторяет ту же metadata страницу и добавляет
+read/access/view на каждой строке и page credits. У no-row/absent/checkpoint
+view/access=null. Final view — public `AnalysisReader.brief()` без scientific
+переинтерпретации. Parent, child и frontend сравнивают полный StateRef/7 Identity,
+source invocation, все 5 O1 FileRef fields, original pins и порядок строк.
+Failure/change/credit/cancel у admitted final прекращает всю page; частичный brief
+не публикуется, metadata и исходные scientific statuses не переписываются.
+
+Один existing isolated child последовательно открывает final source domains.
+До следующего источника public reader/facade и domain FDs закрываются; domain
+проверяется снова после reader close. Для n final sources≤8 заранее резервируются
+два nonrefundable этапа на источник: `share=floor(128MiB/(2*n))` для public
+StateReader constructor и отдельно AnalysisReader brief+close. Initialization и
+brief_and_close — разные actual counter epochs; page actual sum включает оба.
+Unused credit не возвращается/не перераспределяется. Metadata≤1MiB/owner≤64MiB и
+существующие object/open-file/process limits сохраняются. До spool/root reads
+резервируются равные output slots из остатка aggregate2MiB; public brief JSON cap
+оставляет в каждом slot 1024B для wrapper. Большая page может честно потребовать
+явного меньшего limit. Logical credits не равны измеренным disk I/O/RSS.
+Страница без final sources не запускает child и не требует local RO binding.
+
+График — scatter actual V per period (V) против **сохранённой знаковой physical J
+(A/m²)**. Нет линий через gaps, abs/J0 повторно, преобразования J в I без area или
+вывода физической сопоставимости по flags/T/branch. IEEE -0, отрицательные и
+предельные finite значения сохраняются; ±Inf/NaN/null не становятся zero и не
+рисуются, raw tags/reasons остаются в таблице/details. Original/current/restoration
+evidence, process, convergence, physical gates, discretization и scientific
+acceptance различаются; null/not_measured не pass. Page/refresh/token/run/tuple
+change/removal немедленно снимает старый brief и инвалидирует late success/error.
+
 ## Remaining producer gates
 
-This increment implements R2 retained explicit-point reads only. Execution-wide
-sources/brief (R1), native current bootstrap (R3), genuine retrieved rooted
-snapshot (R4), and available native performance (R5) retain their separate owning
-producer contracts. Sources/brief return explicit unsupported-contract staging;
-no old-format fallback fills these gaps. Human/agent report read/attach remains
-available. Explicit derive/comparison and actual used-value help remain separate.
+Native current bootstrap (R3), genuine retrieved rooted snapshot (R4), native
+performance (R5), derive/comparison и actual used-value help остаются отдельными
+контрактами. Human/agent report read/attach сохраняется.
 
 Synthetic tests exercise public native5 readers, actual isolated child cleanup,
 API transport and light source/SSR controls with explicitly synthetic RO facts.

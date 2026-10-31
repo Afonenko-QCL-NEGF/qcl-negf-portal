@@ -6,12 +6,185 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from qcl_negf_api import saved_nfs, saved_results
-from qcl_negf_api.saved_results import SavedResultError
 from test_saved_results import BINDING as BINDING
 from test_saved_results import COMPUTER as COMPUTER
+from test_saved_results import catalog_case as catalog_case
+from test_saved_results import catalog_read, read
 from test_saved_results import native_case as native_case
-from test_saved_results import read
+
+from qcl_negf_api import saved_nfs, saved_results
+from qcl_negf_api.saved_results import SavedResultError
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "state_id",
+        "sequence",
+        "identity",
+        "manifest",
+        "invocation",
+        "O1path",
+        "O1bytes",
+        "O1sha",
+        "O1schema",
+        "O1media",
+        "order",
+    ],
+)
+def test_R1_child_reply_full_binding_checked_again_in_parent(catalog_case, changed):
+    c = catalog_case(finals=2, gaps=False)
+    page = catalog_read(c)
+
+    def worker(op, request, spool, *args):
+        result = saved_results._read_request({"operation": op, **request}, spool)
+        if changed == "order":
+            result["points"].reverse()
+        else:
+            view = result["points"][0]["view"]
+            if changed == "state_id":
+                view["source_state"]["state_id"] = "foreign"
+            elif changed == "sequence":
+                view["source_state"]["state_sequence"] = "2"
+            elif changed == "identity":
+                view["identity"]["attempt"] = "8"
+            elif changed == "manifest":
+                view["source_state"]["manifest"]["media_type"] = "application/foreign"
+            elif changed == "invocation":
+                view["invocation"]["source_epoch"] = "foreign"
+            else:
+                key = {
+                    "O1path": "path",
+                    "O1bytes": "bytes",
+                    "O1sha": "sha256",
+                    "O1schema": "schema",
+                    "O1media": "media_type",
+                }[changed]
+                view["artifact_ref"][key] = "foreign"
+        return result
+
+    c.adapter.worker = worker
+    with pytest.raises(SavedResultError, match="identity_mismatch"):
+        catalog_read(c, "brief", {"page_ref": page["pagination"]["page_ref"]})
+
+
+@pytest.mark.parametrize("mode", ["success", "failure_second", "cancel_open_owner"])
+def test_R1_actual_qualified_page_child_close_kill_and_reap(
+    catalog_case, tmp_path, monkeypatch, record_property, mode
+):
+    import asyncio
+    import hashlib
+    import importlib
+    import json
+
+    c = catalog_case(finals=2, gaps=False)
+    if mode == "failure_second":
+        from test_saved_results import _catalog_repin
+
+        c.catalog["binding"]["points"][1]["source"]["observations"]["sha256"] = "0" * 64
+        _catalog_repin(c)
+    page = catalog_read(c)
+    modules = {}
+    for name in (
+        "qcl_negf_api.saved_results",
+        "qcl_negf_api.saved_nfs",
+        "qcl_negf_results.state",
+        "qcl_negf_results.saved_views",
+        "qcl_negf_contracts.messages",
+    ):
+        m = importlib.import_module(name)
+        p = Path(m.__file__).resolve()
+        modules[name] = (str(p), hashlib.sha256(p.read_bytes()).hexdigest())
+    assert "/p09-native-portal/" in modules["qcl_negf_api.saved_results"][0]
+    assert "/p30-s3-results/" in modules["qcl_negf_results.state"][0]
+    assert "/p30-performance-sideband-contracts/" in modules["qcl_negf_contracts.messages"][0]
+    wrapper = tmp_path / "page-child.py"
+    marker = tmp_path / "opened"
+    code = (
+        "import hashlib,importlib,signal\nfrom pathlib import Path\n"
+        "from qcl_negf_api import saved_nfs,saved_results\nexpected="
+        + repr(modules)
+        + "\nfor name,(path,digest) in expected.items():\n"
+        " m=importlib.import_module(name)\n"
+        " assert str(Path(m.__file__).resolve())==path\n"
+        " assert hashlib.sha256(Path(path).read_bytes()).hexdigest()==digest\n"
+    )
+    code += (
+        "saved_nfs.ROOT="
+        + repr(str(c.root))
+        + "\nsaved_nfs._mountinfo=lambda:"
+        + repr(c.mount)
+        + "\n"
+    )
+    if mode == "cancel_open_owner":
+        code += (
+            "from qcl_negf_results.state import StateReader\noriginal=StateReader.__init__\n"
+            "def held(self,*a,**k):\n original(self,*a,**k)\n Path("
+            + repr(str(marker))
+            + ").write_text('open')\n signal.pause()\nStateReader.__init__=held\n"
+        )
+    code += "raise SystemExit(saved_results._main())\n"
+    wrapper.write_text(code)
+    original = saved_results.subprocess.Popen
+    children = []
+
+    def spawn(args, **kwargs):
+        assert args[1:3] == ["-m", "qcl_negf_api.saved_results"]
+        assert all(
+            p in kwargs["env"]["PYTHONPATH"]
+            for p in ("p09-native-portal", "p30-s3-results", "p30-performance-sideband-contracts")
+        )
+        child = original([args[0], str(wrapper), args[-1]], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(saved_results.subprocess, "Popen", spawn)
+    c.adapter.worker = saved_results._worker
+    query = {"page_ref": page["pagination"]["page_ref"]}
+    if mode == "success":
+        value = catalog_read(c, "brief", query)
+        assert value["credits"]["stage_share"] == 33554432
+        record_property("r1_actual_child_page_golden", json.dumps(value))
+    elif mode == "failure_second":
+        with pytest.raises(SavedResultError, match="corrupt_result"):
+            catalog_read(c, "brief", query)
+    else:
+
+        async def cancel():
+            task = asyncio.create_task(c.adapter.read("brief", c.selection, query))
+            for _ in range(400):
+                if marker.exists():
+                    break
+                await asyncio.sleep(0.005)
+            assert marker.exists()
+            with pytest.raises(SavedResultError, match="busy"):
+                await c.adapter.read("sources", c.selection, {})
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            for _ in range(200):
+                if c.adapter.active is None:
+                    break
+                await asyncio.sleep(0.005)
+            assert c.adapter.active is None and not c.adapter.busy
+
+        asyncio.run(cancel())
+    assert len(children) == 1
+    assert all(p.poll() is not None and p.stdout.closed and p.stderr.closed for p in children)
+    record_property(
+        "r1_owned_child",
+        json.dumps(
+            {
+                "mode": mode,
+                "children": [
+                    {"pid": p.pid, "returncode": p.returncode, "reaped": p.poll() is not None}
+                    for p in children
+                ],
+                "qualified_modules": modules,
+                "native_mount": "SIMULATED_RO_NOT_NATIVE",
+            }
+        ),
+    )
 
 
 @pytest.mark.parametrize(

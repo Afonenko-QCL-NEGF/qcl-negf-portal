@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+
 from qcl_negf_api.api import create_app
 from qcl_negf_api.settings import Settings
 
@@ -8,6 +9,87 @@ TOKEN = "0123456789abcdef" * 4
 RUN = "11111111-1111-4111-8111-111111111111"
 JOB = "22222222-2222-4222-8222-222222222222"
 CODE = "33333333-3333-4333-8333-333333333333"
+
+
+def test_R1_page_routes_strict_selectors_before_dispatch():
+    import asyncio
+
+    import httpx2
+
+    calls = []
+
+    class Saved:
+        async def read(self, operation, selection, query, disconnect=None):
+            calls.append((operation, selection, query))
+            return {"operation": operation}
+
+        async def close(self):
+            pass
+
+    exact = dict(execution_id="exec", attempt=2, calcjob_uuid=JOB)
+    headers = {"Authorization": "Bearer " + TOKEN}
+    app = create_app(Settings(TOKEN, (CODE,)), SimpleNamespace(), saved_results=Saved())
+
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(0.005)
+
+    async def scenario():
+        # Python3.14/AnyIO in this SOURCE/L host needs a timer to wake thread callbacks.
+        # Auth/router/lifespan remain the actual application; no dependency is mocked.
+        pulse = asyncio.create_task(heartbeat())
+        try:
+            await requests()
+        finally:
+            pulse.cancel()
+            try:
+                await pulse
+            except asyncio.CancelledError:
+                pass
+
+    async def requests():
+        async with (
+            app.router.lifespan_context(app),
+            httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app), base_url="http://testserver"
+            ) as client,
+        ):
+            base = f"/api/v1/runs/{RUN}/saved-results/"
+            response = await client.get(
+                base + "sources", params={**exact, "limit": 3}, headers=headers
+            )
+            assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+            assert calls[-1][2] == {"limit": 3}
+            accepted = len(calls)
+            for bad in (
+                {**exact, "limit": 0},
+                {**exact, "limit": 9},
+                {**exact, "limit": "01"},
+                {**exact, "limit": 2, "cursor": "x"},
+                {**exact, "point_id": "first"},
+                {**exact, "attempt": 9007199254740992},
+                {**exact, "path": "/private"},
+            ):
+                assert (
+                    await client.get(base + "sources", params=bad, headers=headers)
+                ).status_code == 422
+            assert (
+                await client.get(base + "brief", params=exact, headers=headers)
+            ).status_code == 422
+            assert (
+                await client.request(
+                    "GET", base + "sources", params=exact, content=b"{}", headers=headers
+                )
+            ).status_code == 422
+            assert (
+                await client.get(
+                    base + "sources", params=list(exact.items()) + [("attempt", 2)], headers=headers
+                )
+            ).status_code == 422
+            assert (await client.get(base + "sources", params=exact)).status_code == 401
+            assert len(calls) == accepted
+
+    asyncio.run(scenario())
 
 
 def test_native5_exact_retained_selectors_and_full_state_reach_existing_routes():

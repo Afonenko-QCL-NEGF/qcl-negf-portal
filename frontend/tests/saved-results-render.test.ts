@@ -5,6 +5,7 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import {readFile} from 'node:fs/promises';
 import ts from 'typescript';
 import type {SavedSlice} from '../src/saved-results-data.ts';
+import {catalogFixture} from './saved-results.test.ts';
 
 // Reuse the existing locked compiler/display-only render fixture convention.
 const filename=new URL('../src/saved-results.tsx',import.meta.url);
@@ -103,4 +104,75 @@ test('metadata summary keeps absent, checkpoint and retained scope readable with
  assert.doesNotMatch(retained,/<input|<button|checked_ro_current_request/);
  const absent=renderToStaticMarkup(createElement(ui.PointSourceSummary,{source:{...base,source_state:null,source:{kind:'absent',relation:null,reason:'not_recorded'}}}));assert.match(absent,/Источник отсутствует: not_recorded/);
  const checkpoint=renderToStaticMarkup(createElement(ui.PointSourceSummary,{source:{...base,source:{kind:'checkpoint',relation:'current_point_attempt',reason:'interrupted'}}}));assert.match(checkpoint,/финальные карты не объявлены/);
+});
+
+test('R1 scatter renders signed physical J without connecting lines, missing interpolation or rescaling',()=>{
+ const {brief}=catalogFixture();const original=structuredClone(brief);
+ const html=renderToStaticMarkup(createElement(ui.SavedBrief,{page:brief}));finiteSvgGeometry(html);
+ for(const text of ['A/m²','V per period','-0','not_measured','Сопоставимость физических постановок не установлена'])assert.ok(html.includes(text),text);
+ assert.match(html,/<circle/);assert.doesNotMatch(html,/<polyline|scientific accepted|J0/);assert.deepEqual(brief,original);
+ for(const bits of ['7ff0000000000000','fff0000000000000','7ff8000000000042']){const b=structuredClone(brief);b.points[0].view!.scalar_observables.current_density_A_per_m2!.bits=bits;const missing=renderToStaticMarkup(createElement(ui.SavedBrief,{page:b}));assert.doesNotMatch(missing,/<circle|<polyline/);finiteSvgGeometry(missing);}
+});
+test('R1 nonzero signed physical J ignores saved J0 display context',()=>{
+ const {brief}=catalogFixture();brief.points[0].view!.scalar_observables.current_density_A_per_m2!.bits='c008000000000000';brief.points[0].view!.conventions={scales:{J0_A_per_m2:{kind:'ieee',type:'f64',bits:'4024000000000000'}}};
+ const html=renderToStaticMarkup(createElement(ui.SavedBrief,{page:brief}));assert.match(html,/<title>0.05: -3<\/title>/);assert.doesNotMatch(html,/-30|<polyline/);finiteSvgGeometry(html);
+});
+
+// Execute the actual component handlers with deterministic hook slots/API promises.
+// This is source/SSR wiring evidence, not a DOM/browser lifecycle qualification.
+const hookURL='data:text/javascript;base64,'+Buffer.from("export const useState=(...a)=>globalThis.__r1Hooks.useState(...a);export const useRef=(...a)=>globalThis.__r1Hooks.useRef(...a);export const useEffect=(...a)=>globalThis.__r1Hooks.useEffect(...a);").toString('base64');
+const apiURL='data:text/javascript;base64,'+Buffer.from("export const api=(...a)=>globalThis.__r1Api(...a);export const errorMessage=e=>String(e.message??e);").toString('base64');
+let wired=transpiled.outputText.replaceAll('"./saved-diagnostics.tsx"',JSON.stringify(diagnosticUrl)).replaceAll("'./saved-diagnostics.tsx'",JSON.stringify(diagnosticUrl));
+for(const [specifier,resolved] of [['react',hookURL],['react/jsx-runtime',import.meta.resolve('react/jsx-runtime')],['./api',apiURL],['./saved-results-data',new URL('../src/saved-results-data.ts',import.meta.url).href]])wired=wired.replaceAll(`"${specifier}"`,JSON.stringify(resolved)).replaceAll(`'${specifier}'`,JSON.stringify(resolved));
+const wiredUI=await import('data:text/javascript;base64,'+Buffer.from(wired).toString('base64'));
+function catalogHarness(){
+ const globals=globalThis as unknown as {__r1Hooks:Record<string,Function>;__r1Api:Function};
+ const slots:unknown[]=[],effects:(()=>void)[]=[];let cursor=0,tree:unknown;
+ const requests:{path:string;resolve:(v:unknown)=>void;reject:(e:unknown)=>void}[]=[];
+ globals.__r1Hooks={useState:(initial:unknown)=>{const i=cursor++;if(!(i in slots))slots[i]=initial;return [slots[i],(v:unknown)=>slots[i]=typeof v==='function'?v(slots[i]):v];},useRef:(value:unknown)=>{const i=cursor++;return slots[i]??(slots[i]={current:value});},useEffect:(f:()=>Function,deps:unknown[])=>{const i=cursor++,old=slots[i] as {deps:unknown[];cleanup?:Function}|undefined;if(!old||deps.some((v,j)=>!Object.is(v,old.deps[j])))effects.push(()=>{old?.cleanup?.();slots[i]={deps:[...deps],cleanup:f()};});}};
+ globals.__r1Api=(_token:string,path:string)=>new Promise((resolve,reject)=>requests.push({path,resolve,reject}));
+ function render(props:unknown){cursor=0;tree=wiredUI.SavedCatalogPanel(props);while(effects.length)effects.shift()!();cursor=0;tree=wiredUI.SavedCatalogPanel(props);return renderToStaticMarkup(tree as never);}
+ function click(text:string){let found=false;function walk(v:unknown){if(Array.isArray(v)){v.forEach(walk);return;}if(!v||typeof v!=='object')return;const e=v as {type:unknown;props:{children?:unknown;onClick?:()=>void}};if(e.type==='button'&&e.props.children===text){found=true;e.props.onClick!();}else walk(e.props?.children);}walk(tree);assert.ok(found,text);}
+ return {render,click,requests};
+}
+const settle=()=>new Promise<void>(resolve=>setImmediate(resolve));
+test('R1 actual manual catalog/brief handlers do not read on mount/poll and render exact declared text',async()=>{
+ const {page,brief,f}=catalogFixture(),h=catalogHarness(),props={token:'token',job:f.selection.calcjob_uuid,run:{uuid:f.selection.run_uuid,children:[{uuid:f.selection.calcjob_uuid,execution_id:'exec',attempt:2}]}};
+ h.render(props);h.render({...props,run:{...props.run,mtime:'poll'}});assert.equal(h.requests.length,0);
+ h.click('Прочитать каталог');assert.equal(h.requests.length,1);assert.match(h.requests[0].path,/sources\?/);assert.doesNotMatch(h.requests[0].path,/point_id|native_binding_uuid/);
+ h.requests.shift()!.resolve(page);await settle();const metadata=h.render(props);assert.ok(metadata.includes('1'+'0'.repeat(2000)));assert.match(metadata,/not_measured|failed/);assert.doesNotMatch(metadata,/<circle/);
+ h.click('Прочитать J(V) этой страницы');assert.match(h.requests[0].path,/brief\?.*page_ref=/);h.requests.shift()!.resolve(brief);await settle();const html=h.render(props);assert.match(html,/<circle/);assert.match(html,/-0/);assert.doesNotMatch(html,/<polyline/);
+ h.render({...props,run:{...props.run,mtime:'another poll'}});assert.equal(h.requests.length,0);
+});
+test('R1 actual component drops deferred success and error for all selection changes and refresh',async()=>{
+ for(const failure of [false,true])for(const cause of ['token','run','execution','attempt','CalcJob','removal','refresh']){
+  const {page,f}=catalogFixture(),h=catalogHarness(),job=f.selection.calcjob_uuid,props={token:'token',job,run:{uuid:f.selection.run_uuid,children:[{uuid:job,execution_id:'exec',attempt:2}]}};
+  h.render(props);h.click('Прочитать каталог');const old=h.requests.shift()!;let next=structuredClone(props);
+  if(cause==='token')next.token='new';if(cause==='run')next.run.uuid=f.selection.calcjob_uuid;
+  if(cause==='execution')next.run.children[0].execution_id='foreign';if(cause==='attempt')next.run.children[0].attempt=3;
+  if(cause==='CalcJob'){next.job='55555555-5555-4555-8555-555555555555';next.run.children[0].uuid=next.job;}
+  if(cause==='removal')next.run.children=[];
+  h.render(next);
+  if(cause==='refresh'){h.click('Прочитать каталог');h.requests.shift()!.resolve(page);await settle();h.render(next);}
+  if(failure)old.reject(new Error('obsolete error'));else old.resolve(page);
+  await settle();const html=h.render(next);assert.doesNotMatch(html,/obsolete error/);
+  if(cause==='refresh')assert.ok(html.includes('1'+'0'.repeat(2000)));else assert.ok(!html.includes('1'+'0'.repeat(2000)),cause);
+ }
+});
+test('R1 actual next/previous page handlers reject late brief success and error and preserve gaps',async()=>{
+ for(const backward of [false,true])for(const failure of [false,true]){
+  const {page,brief,f}=catalogFixture();page.pagination.limit=1;page.pagination.total='2';
+  const sorted=(v:unknown):unknown=>Array.isArray(v)?v.map(sorted):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,sorted((v as Record<string,unknown>)[k])])):v;
+  const oldToken=JSON.parse(Buffer.from(page.pagination.page_ref,'base64url').toString());
+  const token=(offset:string)=>Buffer.from(JSON.stringify(sorted({...oldToken,limit:1,offset}))).toString('base64url');
+  page.pagination.page_ref=token('0');page.pagination.next_cursor=token('1');
+  const second=structuredClone(page);second.pagination.offset='1';second.pagination.page_ref=token('1');second.pagination.previous_cursor=token('0');second.pagination.next_cursor=null;second.points[0].point_id='point2';second.points[0].source_state!.identity.point_id='point2';
+  const h=catalogHarness(),props={token:'token',job:f.selection.calcjob_uuid,run:{uuid:f.selection.run_uuid,children:[{uuid:f.selection.calcjob_uuid,execution_id:'exec',attempt:2}]}};
+  h.render(props);h.click('Прочитать каталог');h.requests.shift()!.resolve(page);await settle();h.render(props);
+  if(backward){h.click('Следующая страница');h.requests.shift()!.resolve(second);await settle();h.render(props);}
+  h.click('Прочитать J(V) этой страницы');const late=h.requests.shift()!;
+  h.click(backward?'Предыдущая страница':'Следующая страница');const next=h.requests.shift()!;assert.match(next.path,/cursor=/);next.resolve(backward?page:second);await settle();h.render(props);
+  if(failure)late.reject(new Error('obsolete page error'));else late.resolve({...brief,pagination:backward?second.pagination:page.pagination});
+  await settle();const html=h.render(props);assert.doesNotMatch(html,/obsolete page error|<circle|<polyline/);if(!backward)assert.match(html,/point2/);
+ }
 });

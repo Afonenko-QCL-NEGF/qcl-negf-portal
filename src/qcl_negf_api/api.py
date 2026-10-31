@@ -1110,13 +1110,22 @@ def create_app(settings: Settings | None = None, service: Any = None,
             from .saved_results import _json
             payload = _json(await request.body())
             required = {"execution_id", "attempt", "calcjob_uuid"}
-            if operation != "performance":
+            if operation == "performance":
+                required |= {"mode", "anchor_key"}
+            else:
                 required |= {"point_id", "source_attempt"}
             if operation == "live-history":
                 required |= {"index_sha256", "generation", "phase", "selection"}
             if not isinstance(payload, dict) or set(payload) != required or request.query_params:
                 raise SavedResultError("selection_required")
             selection = {k: payload.pop(k) for k in ("execution_id", "attempt", "calcjob_uuid")}
+            if operation == "performance":
+                from .live_nfs import performance_query
+                from .saved_results import _selection
+
+                if request.path_params["run_uuid"] != str(run_uuid):
+                    raise SavedResultError("selection_required")
+                performance_query(_selection({"run_uuid": str(run_uuid), **selection}), payload)
         except SavedResultError:
             return JSONResponse({"detail": {"code": "selection_required",
                 "reason": "Exact execution, point and native prefix selectors required"}}, 422,

@@ -375,3 +375,13 @@ poll. Missing client/socket, timeout, overload, invalid reply or unsafe browser 
 with a closed `detail.code`, without private diagnostics or manufactured empty/zero measurements.
 Existing per-execution performance routes and their exact selectors remain separate. This change
 does not provide a new performance producer, scientific acceptance or a frontend view.
+
+## Author report upload
+
+A JSON report can be selected and reviewed as exact UTF-8 text before a single
+explicit save to the selected run. The preview shows its original byte count,
+SHA-256 and string anchor; backend validation remains authoritative. Report
+text is an author's account, separate from scientific acceptance and process
+logs. If the save outcome is unknown, the interface retains a write fence while
+the app remains open: inspect the operation with an operator before any further
+write. A failed readback after a confirmed save does not repeat the save.

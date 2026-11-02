@@ -242,3 +242,69 @@ def test_docs_misses_never_reach_root_static_fallback(bundle, monkeypatch):
         assert http.get(f'/docs?tail={REV}/index.html').status_code == 503
         for path in ['/docs/current/index.html', f'/docs/{REV}/%252e%252e/secret']:
             assert http.get(path).status_code == 404
+
+
+PUBLIC_CSV = 'core/assets/physics/data/basis_metrics.csv'
+
+
+def test_registered_public_csv_keeps_bundle_available_and_exact_http_contract(bundle):
+    root, document, _, write = bundle
+    raw = b'basis,condition\n2,0.5\n'
+    path = root / PUBLIC_CSV
+    path.parent.mkdir(parents=True)
+    path.write_bytes(raw)
+    document['files'].append({'path': PUBLIC_CSV, 'media_type': 'text/csv',
+                              'bytes': len(raw), 'sha256': digest(raw)})
+    with client(write()) as http:
+        availability = http.get('/api/v1/config', headers=AUTH).json()['documentation']
+        assert availability['status'] == 'available'
+        assert http.get(f'/docs/{REV}/index.html').status_code == 200
+        response = http.get(f'/docs/{REV}/{PUBLIC_CSV}')
+        assert response.status_code == 200 and response.content == raw
+        assert response.headers['content-type'] == 'text/csv'
+        assert response.headers['content-length'] == str(len(raw))
+        assert response.headers['etag'] == f'"{digest(raw)}"'
+        assert response.headers['cache-control'] == 'public,max-age=31536000,immutable'
+        assert 'unsafe-inline' not in response.headers['content-security-policy']
+        head = http.head(f'/docs/{REV}/{PUBLIC_CSV}')
+        assert head.status_code == 200 and head.content == b''
+        assert head.headers['content-type'] == 'text/csv'
+        assert head.headers['content-length'] == str(len(raw))
+        assert http.get(f'/docs/{REV}/{PUBLIC_CSV}', headers={
+            'If-None-Match': response.headers['etag']}).status_code == 304
+
+
+@pytest.mark.parametrize('case', ['unlisted', 'mime', 'digest', 'symlink', 'private',
+                                  'results', 'other_csv', 'traversal'])
+def test_csv_inventory_and_public_path_guards_remain_strict(bundle, case):
+    from qcl_negf_api.documentation import _public
+
+    root, document, _, write = bundle
+    paths = {'private': 'core/private/basis_metrics.csv',
+             'results': 'core/results/basis_metrics.csv',
+             'other_csv': 'assets/unreviewed.csv',
+             'traversal': 'core/assets/physics/data/../basis_metrics.csv'}
+    name = paths.get(case, PUBLIC_CSV)
+    path = root / PUBLIC_CSV
+    path.parent.mkdir(parents=True)
+    raw = b'basis,condition\n2,0.5\n'
+    if case == 'symlink':
+        path.symlink_to(root / 'index.html')
+        raw = (root / 'index.html').read_bytes()
+    else:
+        path.write_bytes(raw)
+    if case != 'unlisted':
+        document['files'].append({'path': name,
+                                  'media_type': 'text/plain' if case == 'mime' else 'text/csv',
+                                  'bytes': len(raw),
+                                  'sha256': 'd' * 64 if case == 'digest' else digest(raw)})
+    with client(write()) as http:
+        status = http.get('/api/v1/config', headers=AUTH).json()['documentation']
+        if case == 'unlisted':
+            assert status['status'] == 'available'
+            assert http.get(f'/docs/{REV}/{PUBLIC_CSV}').status_code == 404
+        else:
+            assert status['status'] == 'unavailable' and status['reason'] == 'invalid_bundle'
+            assert http.get(f'/docs/{REV}/index.html').status_code == 503
+        if case in paths:
+            assert not _public(name)

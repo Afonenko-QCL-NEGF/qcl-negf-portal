@@ -25,7 +25,9 @@ MEDIA_TYPES = {
     '.ttf': 'font/ttf', '.png': 'image/png', '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
     '.svg': 'image/svg+xml', '.ico': 'image/vnd.microsoft.icon', '.txt': 'text/plain',
+    '.csv': 'text/csv',
 }
+PUBLIC_SOURCE_CSV = 'core/assets/physics/data/basis_metrics.csv'
 JOURNEYS = {
     'researcher': 'core/theory/09_scba.html#researcher-scba-route',
     'developer': 'runner/user/configuration.html#developer-configuration-route',
@@ -65,6 +67,7 @@ def _public(value: str) -> bool:
         (value in {'index.html', 'NOTICE.txt', 'bundle.json'} or value.startswith(
             ('core/', 'runner/', 'operator/', 'assets/', 'help/')))
         and path.suffix.lower() in MEDIA_TYPES
+        and (path.suffix.lower() != '.csv' or value == PUBLIC_SOURCE_CSV)
         and not any(part.lower() in {'logs', 'depot', 'depots', 'raw', 'results', 'private'}
                     for part in path.parts)
         and (path.suffix.lower() != '.txt' or value == 'NOTICE.txt'

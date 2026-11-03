@@ -324,10 +324,6 @@ def test_real_isolated_worker_uses_selected_imports_and_closes_actual_child(
         for module in (saved_results, selected_state, selected_contracts)
     }
     _qualified_source_roots(modules)
-    assert (
-        modules[selected_state.__name__][1]
-        == "732ec8585dc5a16aa3b841d6f43f8cfe5d7417342dcd5a38cbfedea4654de596"
-    )
     wrapper.write_text(
         "import hashlib,importlib\nfrom pathlib import Path\n"
         "from qcl_negf_api import saved_nfs,saved_results\n"
@@ -373,6 +369,8 @@ def test_real_isolated_worker_uses_selected_imports_and_closes_actual_child(
         child.poll() is not None and child.stdout.closed and child.stderr.closed
         for child in children
     )
+    for path, digest in modules.values():
+        assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest
 
 
 def test_worker_cancel_kills_and_reaps_owned_child(native_case, tmp_path, monkeypatch):

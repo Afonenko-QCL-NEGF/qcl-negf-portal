@@ -31,7 +31,7 @@ BINDING = dict(
 
 
 @pytest.fixture
-def native_case(tmp_path, monkeypatch):
+def native_case(tmp_path, monkeypatch, results_fixture_sources):
     from consumer_context_fixture import semantic_fixture
 
     from qcl_negf_api import saved_nfs, saved_results

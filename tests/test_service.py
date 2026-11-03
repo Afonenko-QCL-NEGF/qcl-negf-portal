@@ -186,17 +186,12 @@ def test_native_retained_read_is_dispatched_only_on_actor_owner(monkeypatch):
         aiida.manage, "get_manager", lambda: SimpleNamespace(unload_profile=lambda: None)
     )
     monkeypatch.setattr(aiida, "load_profile", lambda profile: None)
-    from pathlib import Path
-
     import aiida_qcl_negf.service as owner
 
-    assert (
-        Path(owner.__file__).resolve()
-        == Path(__file__).resolve().parents[2] / "p07-b-credit-aiida/src/aiida_qcl_negf/service.py"
-    )
-
     def read(*args, **kwargs):
-        events.append(threading.get_ident())
+        assert args == ("run", "exec")
+        assert kwargs == {"attempt": 2, "calcjob_uuid": "job", "point_id": "point"}
+        events.append((threading.get_ident(), asyncio.get_event_loop()))
         return {"status": "available", "detached": True}
 
     monkeypatch.setattr(owner, "get_native_result_source", read)
@@ -205,6 +200,7 @@ def test_native_retained_read_is_dispatched_only_on_actor_owner(monkeypatch):
         assert service.get_native_result_source(
             "run", "exec", attempt=2, calcjob_uuid="job", point_id="point"
         ) == {"status": "available", "detached": True}
-        assert len(events) == 1 and events[0] != threading.get_ident()
+        assert len(events) == 1 and events[0][0] != threading.get_ident()
     finally:
-        service.close()
+        assert service.close().state == "completed"
+    assert events[0][1].is_closed()

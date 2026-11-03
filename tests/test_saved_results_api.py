@@ -207,6 +207,7 @@ def test_P10_history_posts_strict_before_dispatch_and_never_get():
     import json
 
     import httpx2
+    from starlette.routing import Mount
     from test_saved_results import SEL
 
     calls = []
@@ -255,6 +256,21 @@ def test_P10_history_posts_strict_before_dispatch_and_never_get():
     assessment = dict.fromkeys(("model", "discretization", "protocol", "source"), "unknown")
     assessment.update(evidence=[], reason="Unassessed")
     app = create_app(Settings(TOKEN, (CODE,)), SimpleNamespace(), saved_results=Saved())
+    actions = ("derive-history", "compare-history")
+    base = "/api/v1/runs/{run_uuid}/saved-results/"
+    assert {
+        route.path: route.methods
+        for route in app.routes
+        if route.path in {base + action for action in actions}
+    } == {base + action: {"POST"} for action in actions}
+    # A packaged browser mount fully matches GET before the router can use its
+    # partial POST match. StaticFiles rejects the missing API path with 404;
+    # source checkouts without that mount use the router's 405 response.
+    web_mounted = any(
+        isinstance(route, Mount) and route.path == "" and route.name == "web"
+        for route in app.routes
+    )
+    rejected_get_status = 404 if web_mounted else 405
 
     async def pulse():
         while True:
@@ -296,7 +312,9 @@ def test_P10_history_posts_strict_before_dispatch_and_never_get():
                 assert (
                     await client.post(path + "derive-history?x=1", json=single, headers=h)
                 ).status_code == 422
-                assert (await client.get(path + "derive-history", headers=h)).status_code == 405
+                for action in actions:
+                    response = await client.get(path + action, headers=h)
+                    assert response.status_code == rejected_get_status
                 assert len(calls) == n
         finally:
             timer.cancel()

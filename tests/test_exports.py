@@ -96,7 +96,7 @@ def test_export_forwards_exact_frozen_plan_bytes_and_source(monkeypatch):
         (destination / f"{digest}.tar.xz").write_bytes(payload)
         return {
             "schema": "qcl-negf.science-export.v3",
-            "contract_set": "qcl-negf.results.v1",
+            "contract_set": "qcl-negf.results.v2",
             "transport_schema": "qcl-negf.export-archive.v1",
             "profile": "science",
             "snapshot_identity": "b" * 64,
@@ -145,7 +145,7 @@ def publish_test_archive(destination, profile, payload=b"complete archive", tail
     """Storage fixture only; scientific selection/validation is not exercised."""
     digest = hashlib.sha256(payload).hexdigest()
     receipt = {
-        "schema": "qcl-negf.science-export.v3", "contract_set": "qcl-negf.results.v1",
+        "schema": "qcl-negf.science-export.v3", "contract_set": "qcl-negf.results.v2",
         "transport_schema": "qcl-negf.export-archive.v1", "profile": profile,
         "snapshot_identity": "b" * 64, "sha256": digest, "bytes": len(payload),
         "filename": "test-export.tar.xz", "archive": f"{digest}.tar.xz",
@@ -153,6 +153,24 @@ def publish_test_archive(destination, profile, payload=b"complete archive", tail
     (destination / receipt["archive"]).write_bytes(payload)
     (destination / ("b" * 64 + ".json")).write_text(json.dumps(receipt) + " " * tail)
     return receipt
+
+
+def test_legacy_export_receipt_is_refused_before_ready(monkeypatch):
+    def exporting(root, destination, **kwargs):
+        receipt = publish_test_archive(destination, kwargs["profile"])
+        receipt["contract_set"] = "qcl-negf.results.v1"
+        return receipt
+
+    monkeypatch.setattr("qcl_negf_results.export.export_snapshot", exporting)
+    store = ExportStore(source_service(), Settings(TOKEN, (CODE,)))
+    try:
+        entry = store.create(RUN, "point_1", "science")
+        assert wait_terminal(store, entry["export_id"])["state"] == "failed"
+        with pytest.raises(ExportBusy, match="not ready for download"):
+            with store.open(entry["export_id"]):
+                pytest.fail("Incompatible archive became downloadable")
+    finally:
+        store.close()
 
 
 def test_derived_spool_expansion_uses_the_admitted_budget(monkeypatch):

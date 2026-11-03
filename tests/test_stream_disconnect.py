@@ -79,7 +79,7 @@ async def test_asgi_disconnect_closes_reader_and_releases_export_lease(
         assert (root / "native.bin").read_bytes() == b"data"
         (destination / f"{digest}.tar.xz").write_bytes(payload)
         return {
-            "schema": "qcl-negf.science-export.v3", "contract_set": "qcl-negf.results.v1",
+            "schema": "qcl-negf.science-export.v3", "contract_set": "qcl-negf.results.v2",
             "transport_schema": "qcl-negf.export-archive.v1", "profile": "science",
             "snapshot_identity": "b" * 64, "sha256": digest, "bytes": len(payload),
             "filename": "small-science.tar.xz", "archive": f"{digest}.tar.xz",

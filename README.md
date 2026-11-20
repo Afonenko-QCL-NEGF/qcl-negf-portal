@@ -1,3 +1,5 @@
+> **Переход QCL NEGF.** В приложении `qcl-negf` доступен раздел [Независимый анализ научного результата](https://github.com/Afonenko-QCL-NEGF/qcl-negf/tree/main/analysis/). Этот репозиторий хранит историю. [Исходная редакция README](https://github.com/Afonenko-QCL-NEGF/qcl-negf-portal/blob/ef73b91ec80fe674071e4af8eb59b4f225d17282/README.md).
+
 # QCL-NEGF Portal
 
 A web interface for quantum transport calculations run by [AiiDA](https://www.aiida.net/) and Slurm. The portal submits frozen scientific plans to the QCL-NEGF AiiDA plugin and reads execution state and provenance from AiiDA.

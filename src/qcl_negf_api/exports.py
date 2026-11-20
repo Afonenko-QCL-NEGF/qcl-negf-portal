@@ -13,10 +13,9 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from qcl_negf_contracts.artifacts import validate_export_receipt
-from qcl_negf_contracts.messages import TERMINAL
 from qcl_negf_results.export_budget import DEFAULT_RESERVE_BYTES
 
 from .settings import Settings
@@ -85,19 +84,69 @@ class ExportStore:
                 raise LookupError("Export is unavailable or expired; prepare it again")
             return self._public(entry)
 
-    def create(self, run: str, execution_id: str, profile: str) -> dict[str, Any]:
-        entries = [item for item in self.service.list_artifacts(run)
-                   if item["execution_id"] == execution_id]
-        if not entries:
-            raise LookupError("Retrieved execution artifacts are not available")
-        seen: set[str] = set()
-        for item in entries:
+    def _selection_call(self, operation: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return getattr(self.service, operation)(*args, **kwargs)
+        except (LookupError, ValueError):
+            raise
+        except Exception as exc:
+            raise RuntimeError("Exact export selection service is unavailable") from exc
+
+    def create(self, run: str, execution_id: str, profile: str, *,
+               attempt=None, calcjob_uuid=None) -> dict[str, Any]:
+        try:
+            if not isinstance(run, str):
+                raise ValueError
+            run = str(UUID(run))
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("A full process UUID is required") from exc
+        selection = self._selection_call(
+            "get_export_selection", run, execution_id, attempt=attempt, calcjob_uuid=calcjob_uuid,
+        )
+        invalid = "Export selection metadata is inconsistent"
+        if (not isinstance(selection, dict)
+                or set(selection) != {"execution_id", "attempt", "calcjob_uuid", "status"}
+                or not isinstance(selection["execution_id"], str)
+                or selection["execution_id"] != execution_id
+                or type(selection["attempt"]) is not int or selection["attempt"] < 1
+                or not isinstance(selection["calcjob_uuid"], str)
+                or not isinstance(selection["status"], str)
+                or selection["status"] not in {
+                    "running", "completed", "completed_with_warnings", "failed",
+                    "cancelled", "paused", "unknown"}):
+            raise ValueError(invalid)
+        try:
+            if str(UUID(selection["calcjob_uuid"])) != selection["calcjob_uuid"]:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError(invalid) from exc
+        # Detach before subsequent actor calls or cache access.
+        binding = dict(selection)
+        selectors = {key: binding[key] for key in ("attempt", "calcjob_uuid")}
+        rows = self._selection_call(
+            "list_execution_artifacts", run, execution_id, **selectors,
+        )
+        if not isinstance(rows, list) or len(rows) > 10000:
+            raise ValueError(invalid)
+        entries, seen = [], set()
+        for item in rows:
+            if (not isinstance(item, dict)
+                    or set(item) != {"execution_id", "attempt", "calcjob_uuid", "path", "size"}
+                    or any(item[key] != binding[key] for key in
+                           ("execution_id", "attempt", "calcjob_uuid"))
+                    or type(item["attempt"]) is not int
+                    or not isinstance(item["path"], str)):
+                raise ValueError(invalid)
             path, size = item["path"], item["size"]
             relative = PurePosixPath(path)
-            if (not path or relative.is_absolute() or ".." in relative.parts or "\\" in path
+            if (not path or path == "." or "\x00" in path or relative.is_absolute()
+                    or ".." in relative.parts or "\\" in path
                     or str(relative) != path or path in seen or type(size) is not int or size < 0):
-                raise ValueError("Retrieved inventory is invalid")
+                raise ValueError(invalid)
             seen.add(path)
+            entries.append(dict(item))
+        if not entries:
+            raise LookupError("Retrieved execution artifacts are not available")
         source_bytes = sum(item["size"] for item in entries)
         # Include source copy, pin spool, derived objects and finalized archive.
         # This conservative reservation is admission, not a filesystem quota.
@@ -107,11 +156,15 @@ class ExportStore:
             if self._cancelled.is_set():
                 raise RuntimeError("Export service is stopping")
             for identifier, entry in list(self._entries.items()):
-                if ((entry["run_uuid"], entry["execution_id"], entry["profile"])
-                        == (run, execution_id, profile) and entry["expires_unix"] > time.time()):
+                if ((entry["run_uuid"], entry["execution_id"], entry["attempt"],
+                     entry["calcjob_uuid"], entry["profile"])
+                        == (run, execution_id, binding["attempt"], binding["calcjob_uuid"], profile)
+                        and entry["expires_unix"] > time.time()):
                     if entry["state"] in {"preparing", "ready"}:
-                        return self._public(entry)
-                    del self._entries[identifier]
+                        if entry["status"] == binding["status"]:
+                            return self._public(entry)
+                    else:
+                        del self._entries[identifier]
             if any(entry["state"] == "preparing" for entry in self._entries.values()):
                 raise ExportBusy("Another archive is being prepared; try again after it finishes")
             used = sum(entry["reserved"] for entry in self._entries.values())
@@ -120,7 +173,7 @@ class ExportStore:
                 raise ExportStorage("Complete retrieved snapshot exceeds available export storage")
             identifier = str(uuid4())
             entry = {
-                "export_id": identifier, "run_uuid": run, "execution_id": execution_id,
+                "export_id": identifier, "run_uuid": run, **binding,
                 "profile": profile, "state": "preparing", "progress": {"phase": "retrieving"},
                 "expires_unix": time.time() + self.settings.export_ttl_seconds,
                 "reserved": reservation, "readers": 0, "source_bytes": source_bytes,
@@ -148,7 +201,10 @@ class ExportStore:
             from qcl_negf_results.export import export_snapshot
 
             try:
-                frozen = self.service.get_export_plan(entry["run_uuid"], entry["execution_id"])
+                frozen = self.service.get_export_plan(
+                    entry["run_uuid"], entry["execution_id"],
+                    attempt=entry["attempt"], calcjob_uuid=entry["calcjob_uuid"],
+                )
             except (LookupError, ValueError, OSError) as exception:
                 raise ExportPlan(
                     "Frozen plan is unavailable or invalid; export refused"
@@ -163,7 +219,8 @@ class ExportStore:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 copied = 0
                 with self.service.open_artifact(
-                    entry["run_uuid"], entry["execution_id"], item["path"]
+                    entry["run_uuid"], entry["execution_id"], item["path"],
+                    attempt=entry["attempt"], calcjob_uuid=entry["calcjob_uuid"],
                 ) as stream, target.open("xb") as handle:
                     while data := stream.read(BLOCK):
                         copied += len(data)
@@ -177,18 +234,12 @@ class ExportStore:
                         })
                 if copied != item["size"]:
                     raise ValueError("Retrieved artifact is truncated")
-            result = self.service.get_run(entry["run_uuid"]).get("results", {}).get(
-                entry["execution_id"], {}
-            )
-            status = result.get("status", "running") if isinstance(result, dict) else "running"
-            # Process exit status is not evidence of scientific completion.
-            status = status if status in TERMINAL else "running"
             byte_budget = self._storage(identifier, total)
             if byte_budget <= 0:
                 raise ExportStorage("No export spool budget remains after the retrieved copy")
             receipt = export_snapshot(
                 source / "result", output, profile=entry["profile"],
-                job_id=entry["execution_id"], job_status=status,
+                job_id=entry["execution_id"], job_status=entry["status"],
                 plan=frozen["plan"], plan_source=frozen["source"],
                 byte_budget=byte_budget, reserve_bytes=DEFAULT_RESERVE_BYTES,
                 progress=lambda progress: self._progress(identifier, progress),

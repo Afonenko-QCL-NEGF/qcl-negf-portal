@@ -10,12 +10,16 @@ import {
   api,
   download,
   downloadExport,
+  prepareExport,
   errorMessage,
   isTerminal,
   readableBytes,
   type Artifact,
+  type AgentReport,
+  type AgentReportReceipt,
   type Config,
   type ExportStatus,
+  type ExportSelection,
   type ReportEntry,
   type Resources,
   type Run,
@@ -31,7 +35,9 @@ function State({ run }: { run: Run }) {
   );
 }
 
-function ExportPanel({ token, uuid, executionId }: { token: string; uuid: string; executionId: string }) {
+function ExportPanel({ token, uuid, executionId, attempt, calcjob_uuid }: {
+  token: string; uuid: string; executionId: string;
+} & ExportSelection) {
   const [profile, setProfile] = useState<"science" | "full-state">("science");
   const [status, setStatus] = useState<ExportStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -54,16 +60,15 @@ function ExportPanel({ token, uuid, executionId }: { token: string; uuid: string
     setBusy(true);
     setError("");
     try {
-      setStatus(await api<ExportStatus>(token, `/runs/${uuid}/exports`, {
-        execution_id: executionId, profile,
-      }));
+      setStatus(await prepareExport(token, uuid, executionId, profile, { attempt, calcjob_uuid }));
     } catch (err) { setError(errorMessage(err)); }
     finally { setBusy(false); }
   }
 
   const progress = status?.progress;
   return <div className="export-card">
-    <strong><code>{executionId}</code></strong>
+    <strong><code>{executionId}</code> · attempt {attempt}</strong>
+    <p className="muted">CalcJob <code>{calcjob_uuid}</code></p>
     <div className="export-actions">
       <select aria-label={`Export profile for ${executionId}`} value={profile}
         disabled={busy || status?.state === "preparing"}
@@ -75,6 +80,11 @@ function ExportPanel({ token, uuid, executionId }: { token: string; uuid: string
         {busy ? "Requesting…" : "Prepare archive"}
       </button>
     </div>
+    {status && <dl>
+      <dt>Selected attempt</dt><dd>{status.attempt}</dd>
+      <dt>Selected CalcJob</dt><dd><code>{status.calcjob_uuid}</code></dd>
+      <dt>Recorded scientific status</dt><dd>{status.status}</dd>
+    </dl>}
     {status?.state === "preparing" && <p role="status" className="muted">
       Preparing archive: {progress?.phase.replaceAll("_", " ")}
       {progress?.total_bytes ? ` · ${readableBytes(progress.completed_bytes ?? 0)} / ${readableBytes(progress.total_bytes)}` : ""}
@@ -101,6 +111,104 @@ function ExportPanel({ token, uuid, executionId }: { token: string; uuid: string
     </>}
     {error && <p role="alert">{error}</p>}
   </div>;
+}
+
+function AgentReportsPanel({ token, uuid }: { token: string; uuid: string }) {
+  const [receipts, setReceipts] = useState<AgentReportReceipt[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [revision, setRevision] = useState(0);
+  const [selected, setSelected] = useState("");
+  const [file, setFile] = useState<AgentReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [reading, setReading] = useState(false);
+  const [error, setError] = useState("");
+  const selectionSequence = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    selectionSequence.current += 1;
+    setReceipts([]);
+    setSelected("");
+    setFile(null);
+    setReading(false);
+    setError("");
+    setLoading(true);
+    void api<{ reports: AgentReportReceipt[] }>(token, `/runs/${uuid}/agent-reports?limit=20&offset=${offset}`)
+      .then((value) => { if (active) setReceipts(value.reports); })
+      .catch((err) => { if (active) setError(errorMessage(err)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; selectionSequence.current += 1; };
+  }, [token, uuid, offset, revision]);
+
+  async function selectReport(identifier: string) {
+    const sequence = ++selectionSequence.current;
+    setSelected(identifier);
+    setFile(null);
+    setError("");
+    setReading(Boolean(identifier));
+    if (!identifier) return;
+    try {
+      const value = await api<AgentReport>(token, `/runs/${uuid}/agent-reports/${identifier}`);
+      if (sequence === selectionSequence.current) setFile(value);
+    } catch (err) {
+      if (sequence === selectionSequence.current) setError(errorMessage(err));
+    } finally {
+      if (sequence === selectionSequence.current) setReading(false);
+    }
+  }
+
+  const receipt = receipts.find((value) => value.uuid === selected);
+  return <section aria-label="Agent reports for this run">
+    <h4>Agent reports for this run</h4>
+    <p className="muted">These files contain author conclusions. Scientific result statuses and process logs remain separate.</p>
+    <p className="muted">This run view does not establish a stable research card or canonical question relation.</p>
+    <div className="export-actions">
+      <select aria-label="Agent report file" value={selected} disabled={loading || !receipts.length}
+        onChange={(event) => void selectReport(event.target.value)}>
+        <option value="">Select a report file</option>
+        {receipts.map((value) => <option key={value.uuid} value={value.uuid}>
+          {value.filename} · {new Date(value.ctime).toLocaleString()} · {value.uuid}
+        </option>)}
+      </select>
+      <button disabled={loading} onClick={() => setRevision((value) => value + 1)}>Refresh reports</button>
+      <button disabled={loading || offset === 0} onClick={() => setOffset((value) => Math.max(0, value - 20))}>Previous reports</button>
+      <button disabled={loading || receipts.length < 20} onClick={() => setOffset((value) => value + 20)}>Next reports</button>
+    </div>
+    {loading && <p role="status" className="muted">Loading report files…</p>}
+    {!loading && !receipts.length && <p className="empty small">No report files on this page.</p>}
+    {reading && <p role="status" className="muted">Reading report file…</p>}
+    {error && <p role="alert">{error}</p>}
+    {file && receipt && <>
+      <dl>
+        <dt>File</dt><dd><code>{receipt.filename}</code></dd>
+        <dt>Report UUID</dt><dd><code>{receipt.uuid}</code></dd>
+        <dt>Size</dt><dd>{readableBytes(receipt.bytes)}</dd>
+        <dt>SHA-256</dt><dd><code>{receipt.sha256}</code></dd>
+        <dt>Anchored run</dt><dd><code>{file.anchor.run_uuid}</code></dd>
+        <dt>Frozen definition</dt><dd>{file.anchor.root_definition_id} ({file.anchor.root_kind})</dd>
+        <dt>Plan fingerprint</dt><dd><code>{file.anchor.plan_fingerprint}</code></dd>
+      </dl>
+      <h5>Author question snapshot</h5>
+      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{file.question_snapshot}</div>
+      <h5>Used run and attempt references</h5>
+      {file.used_runs.length ? <ol>{file.used_runs.map((reference, index) => <li key={index}>
+        <dl>
+          <dt>Run</dt><dd><code>{reference.run_uuid}</code></dd>
+          <dt>Plan fingerprint</dt><dd><code>{reference.plan_fingerprint}</code></dd>
+          <dt>Execution</dt><dd>{reference.execution_id}</dd>
+          <dt>Definition / variant</dt><dd>{reference.definition_id} / {reference.variant_id}</dd>
+          <dt>Attempt</dt><dd>{reference.attempt}</dd>
+          <dt>CalcJob UUID</dt><dd><code>{reference.calcjob_uuid}</code></dd>
+        </dl>
+      </li>)}</ol> : <p className="empty small">No used run or attempt references were supplied by the author.</p>}
+      <h5>Conclusion</h5>
+      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{file.conclusion}</div>
+      <h5>Reasoning</h5>
+      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{file.reasoning}</div>
+      <h5>Limitations</h5>
+      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{file.limitations}</div>
+    </>}
+  </section>;
 }
 
 function App() {
@@ -556,11 +664,11 @@ function App() {
                     {artifacts.length ? (
                       <ul className="files">
                         {artifacts.map((file) => (
-                          <li key={`${file.execution_id}/${file.path}`}>
+                          <li key={`${file.execution_id}/${file.attempt}/${file.calcjob_uuid}/${file.path}`}>
                             <div>
                               <code>{file.path}</code>
                               <span className="muted">
-                                {file.execution_id} · {readableBytes(file.size)}
+                                {file.execution_id} · attempt {file.attempt} · {readableBytes(file.size)}
                               </span>
                             </div>
                             {config &&
@@ -589,9 +697,10 @@ function App() {
                     {detail.children?.some((child) => child.retrieved_uuid) && (
                       <>
                         <h4>Complete result archives</h4>
-                        <p className="muted">One .tar.xz file for each execution and profile. Arrays retain their native scientific values.</p>
+                        <p className="muted">One .tar.xz file for the selected attempt and profile. Arrays retain their native scientific values.</p>
                         {detail.children.filter((child) => child.retrieved_uuid).map((child) =>
-                          <ExportPanel key={`${detail.uuid}/${child.uuid}`} token={token} uuid={detail.uuid} executionId={child.execution_id} />
+                          <ExportPanel key={`${detail.uuid}/${child.uuid}`} token={token} uuid={detail.uuid}
+                            executionId={child.execution_id} attempt={child.attempt} calcjob_uuid={child.uuid} />
                         )}
                       </>
                     )}
@@ -625,6 +734,7 @@ function App() {
                         </pre>
                       </details>
                     )}
+                    <AgentReportsPanel key={detail.uuid} token={token} uuid={detail.uuid} />
                     <h4>Process report</h4>
                     {report.length ? (
                       <ol className="report">

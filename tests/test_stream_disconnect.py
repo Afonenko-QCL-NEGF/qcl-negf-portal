@@ -31,7 +31,9 @@ async def test_asgi_disconnect_closes_reader_and_releases_export_lease(
     opened = []
 
     @contextmanager
-    def open_artifact(run, execution, path):
+    def open_artifact(run, execution, path, *, attempt=None, calcjob_uuid=None):
+        if kind == "artifact" and path == "raw.bin":
+            assert (attempt, calcjob_uuid) == (1, CODE)
         assert (run, execution) == (RUN, "point_1")
         stream = BytesIO(payload if path == "raw.bin" else b"data")
         opened.append(stream)
@@ -41,6 +43,10 @@ async def test_asgi_disconnect_closes_reader_and_releases_export_lease(
             stream.close()
 
     service = SimpleNamespace(
+        get_artifact_metadata=lambda *args, **kwargs: {
+            "execution_id": "point_1", "path": "raw.bin", "size": len(payload),
+            "attempt": 1, "calcjob_uuid": CODE,
+        },
         list_artifacts=lambda run: [
             {"execution_id": "point_1", "path": "result/native.bin", "size": 4},
             {"execution_id": "point_1", "path": "raw.bin", "size": len(payload)},

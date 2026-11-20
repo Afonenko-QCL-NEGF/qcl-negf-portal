@@ -87,20 +87,45 @@ All `/api/v1/` operations require `Authorization: Bearer TOKEN`, except GET/HEAD
 | POST | `/api/v1/runs` | Submit `{plan, code_uuid, resources, label}` |
 | GET | `/api/v1/runs/{uuid}` | State, scientific results and child calculations |
 | GET | `/api/v1/runs/{uuid}/report` | Process report entries |
+| POST | `/api/v1/runs/{uuid}/agent-reports` | Store `{report: "exact UTF-8 JSON text"}`; return 201 stored file receipt |
+| GET | `/api/v1/runs/{uuid}/agent-reports?limit=20&offset=0` | Paginated stored agent report receipts |
+| GET | `/api/v1/runs/{uuid}/agent-reports/{report_uuid}` | Exact `agent-report.json` attachment |
 | POST | `/api/v1/runs/{uuid}/kill` | Request cancellation |
 | GET | `/api/v1/runs/{uuid}/artifacts` | Retrieved file inventory |
 | POST | `/api/v1/runs/{uuid}/artifact/authorize?execution_id=…&path=…` | Authorize a native browser download of one inventoried file |
 | GET/HEAD | `/api/v1/runs/{uuid}/artifact?execution_id=…&path=…` | Stream an inventoried file, with single-byte-range support |
-| POST | `/api/v1/runs/{uuid}/exports` | Prepare `{execution_id, profile}`; default profile `science`, alternative `full-state` |
+| POST | `/api/v1/runs/{uuid}/exports` | Prepare `{execution_id, profile, attempt?, calcjob_uuid?}`; default profile `science`, alternative `full-state` |
 | GET | `/api/v1/exports/{export_id}` | Preparation state/progress, or v3 archive receipt |
 | POST | `/api/v1/exports/{export_id}/authorize` | Set a scoped download cookie and return its credential-free URL |
 | GET/HEAD | `/api/v1/exports/{export_id}/download` | Stream the archive, with Range and If-Range support |
+
+Artifact authorize and GET/HEAD accept optional positive `attempt` and full
+`calcjob_uuid` query selectors. Both selectors constrain the same retrieved child.
+Bearer requests and authorize retain the selected-attempt shortcut, including
+legacy single-attempt workflows. Authorize resolves it once and returns an exact
+URL containing both selectors. The native browser download must follow that
+returned URL: changing or removing either selector invalidates its scoped cookie
+(401 before artifact metadata or payload access). Reusing the old selector-less
+URL with a new cookie is therefore refused. Exact metadata, download limits,
+HEAD and Range headers, and streamed bytes all refer to the same child even if
+published selection changes. HEAD reads cached metadata without opening payload.
+Missing exact children/inventory/path return 404; ambiguous selection, incomplete
+inventory and malformed selectors/path return 422. New Portal requires the
+coordinated AiiDA `get_artifact_metadata` service operation.
+
+Agent reports are separate immutable UTF-8 JSON files, with a 262144-byte raw limit. POST accepts only the strict `report` string envelope, preserves the validated bytes, and returns 201 only after AiiDA stores the file. Repeated POST can create another UUID; submission is not retried automatically. Collections contain receipts and use limits 1–100 with nonnegative offsets. File reads return the original JSON bytes with a fixed attachment filename and Content-Length. These three operations require the bearer token and use no-store responses; missing/wrong-anchor files return 404, invalid/conflicting/corrupt reports 422, and backend unavailability 503. They do not change workflow outputs, process reports or scientific assessments.
+
+The browser displays **Agent reports for this run**, with author question text, exact run/definition/variant/attempt/CalcJob references, and conclusion, reasoning and limitations as escaped text. Empty used-run references are shown explicitly. Author prose does not change machine scientific statuses. This partial run view has no stable research card or canonical question relation; those require the R01 card/catalog interface. The author question snapshot is not proof of a canonical research question. Existing bearer credentials remain in memory only, and the complete interface retains its light theme.
 
 The `plan` field is a string containing the original frozen JSON file, not a parsed nested object. This preserves the exact numerical representation and fingerprint across the browser, API and AiiDA repository.
 
 Submission returns HTTP 202 once AiiDA accepts the workflow. Invalid plans and resource requests return 422; an unapproved Code returns 403; broker unavailability returns 503. Submission is not automatically retried: submitting the same plan again creates a new provenance record. A cancellation request is asynchronous; refresh the workflow to see its eventual state.
 
-Export requests return 202 with an `export_id` and state. The same run/execution/profile reuses an unexpired preparation or ready archive. A busy preparation worker returns 409; insufficient storage admission returns 507. Failed preparation is reported explicitly and never publishes a download. No numerical solver is invoked during export. Scientific completion is supplied only from a terminal scientific result status, never from AiiDA's process exit code. Unsupported or missing scientific status remains `running` for export completeness.
+Export requests accept an optional strict positive integer `attempt` and full UUID string `calcjob_uuid` (omitted or null means unspecified). Both selectors must describe the same child. Omitted selectors use the producer's published selection or the single legacy child; ambiguity or malformed metadata is refused. Invalid or mismatched selectors return 422; unavailable children return 404. Selection is resolved once before admission and pinned through inventory, exact frozen plan and payload reads. The browser sends the attempt and CalcJob UUID from the chosen child and displays the returned identity and recorded scientific status.
+
+Export requests return 202 with an `export_id`, preparation `state`, selected `attempt`, canonical `calcjob_uuid` and frozen scientific `status`. The exact run/execution/attempt/CalcJob/profile reuses an unexpired preparation or ready archive only when the newly observed status also matches. A changed child or status requires a new export; already issued IDs retain their original status and bytes until expiry. A busy preparation worker returns 409; insufficient storage admission returns 507. Failed preparation is reported explicitly and never publishes a download. No numerical solver is invoked during export. Status comes from the selected child's recorded scientific result, independently of process exit status; missing result metadata is `unknown`, and present invalid metadata is refused. `running`, `paused` and `unknown` remain nonterminal for export completeness. A ready archive establishes transport integrity, independently of scientific acceptance.
+
+Deploy the coordinated AiiDA `get_export_selection` and `list_execution_artifacts` operations before upgrading this consumer, then restart Portal. Missing operations return 503; there is no fallback to all-attempt inventory. The cache is process-local and restart clears old entries and download capabilities. The producer contract is documented in [export-selection.md](https://github.com/Afonenko-QCL-NEGF/qcl-negf-aiida/blob/codex/review-closure-export-selection/docs/export-selection.md).
 
 Failed preparation can be retried by an explicit request; the portal never retries it automatically. During service shutdown, copying and compression cancel at the next progress callback and temporary output is removed. Operations within a validator or compaction phase finish until their next callback; shutdown is cooperative.
 

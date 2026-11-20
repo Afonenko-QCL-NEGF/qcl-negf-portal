@@ -12,6 +12,7 @@ export interface Run {
 }
 export interface ChildRun extends Run {
   execution_id: string;
+  attempt: number;
   retrieved_uuid?: string;
 }
 export interface Resources {
@@ -30,6 +31,8 @@ export interface Config {
 }
 export interface Artifact {
   execution_id: string;
+  attempt: number;
+  calcjob_uuid: string;
   path: string;
   size: number;
 }
@@ -37,6 +40,37 @@ export interface ReportEntry {
   level: string;
   message: string;
   time: string;
+}
+export interface AgentReportUsedRun {
+  run_uuid: string;
+  plan_fingerprint: string;
+  execution_id: string;
+  definition_id: string;
+  variant_id: string;
+  attempt: number;
+  calcjob_uuid: string;
+}
+export interface AgentReport {
+  schema: "qcl-negf-agent-report-v1";
+  anchor: {
+    run_uuid: string;
+    root_definition_id: string;
+    root_kind: "study" | "meta";
+    plan_fingerprint: string;
+  };
+  question_snapshot: string;
+  used_runs: AgentReportUsedRun[];
+  conclusion: string;
+  reasoning: string;
+  limitations: string;
+}
+export interface AgentReportReceipt {
+  uuid: string;
+  filename: string;
+  bytes: number;
+  sha256: string;
+  ctime: string;
+  anchor: AgentReport["anchor"];
 }
 export interface ExportReceipt {
   schema: string;
@@ -48,9 +82,14 @@ export interface ExportReceipt {
   profile: "science" | "full-state";
   complete: boolean;
 }
-export interface ExportStatus {
+export interface ExportSelection {
+  attempt: number;
+  calcjob_uuid: string;
+}
+export interface ExportStatus extends ExportSelection {
   export_id: string;
   execution_id: string;
+  status: "running" | "completed" | "completed_with_warnings" | "failed" | "cancelled" | "paused" | "unknown";
   profile: "science" | "full-state";
   state: "preparing" | "ready" | "failed";
   progress: { phase: string; completed_bytes?: number; total_bytes?: number };
@@ -108,8 +147,19 @@ export async function download(
   const query = new URLSearchParams({
     execution_id: artifact.execution_id,
     path: artifact.path,
+    attempt: String(artifact.attempt),
+    calcjob_uuid: artifact.calcjob_uuid,
   });
   await nativeDownload(token, `/runs/${uuid}/artifact/authorize?${query}`);
+}
+
+export async function prepareExport(
+  token: string, uuid: string, executionId: string,
+  profile: "science" | "full-state", selection?: ExportSelection,
+): Promise<ExportStatus> {
+  return api<ExportStatus>(token, `/runs/${uuid}/exports`, {
+    execution_id: executionId, profile, ...selection,
+  });
 }
 
 export async function downloadExport(token: string, exportId: string): Promise<void> {

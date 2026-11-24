@@ -365,6 +365,20 @@ footer {
   color: #93a6ba;
   font-weight: 500;
 }
+.export-card {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid #2b3b4b;
+  border-radius: 6px;
+}
+.export-actions {
+  display: flex;
+  align-items: end;
+  gap: 0.6rem;
+  margin: 0.7rem 0;
+}
+.export-actions select { flex: 1; }
+.export-card progress { display: block; width: 100%; margin: 0.5rem 0; }
 @media (max-width: 850px) {
   main {
     padding: 1rem;

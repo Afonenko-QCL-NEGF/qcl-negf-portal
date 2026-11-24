@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   api,
+  download,
   describeDetail,
   errorMessage,
   isTerminal,
@@ -18,6 +19,36 @@ test("validation errors produce readable messages", () => {
     "Code is invalid; Resource limit exceeded",
   );
   assert.equal(errorMessage(new Error("Offline")), "Offline");
+});
+
+test("download delegates streaming to the browser without buffering a Blob", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const clicks: string[] = [];
+  const url = "/api/v1/runs/workflow/artifact?execution_id=point_1&path=result.bin";
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), `${url.replace("/artifact?", "/artifact/authorize?")}`);
+    assert.equal(init?.method, "POST");
+    assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer secret");
+    return new Response(JSON.stringify({ url }));
+  };
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      createElement: () => {
+        const link = { href: "", download: "", click: () => clicks.push(link.href) };
+        return link;
+      },
+    },
+  });
+  try {
+    await download("secret", "workflow", { execution_id: "point_1", path: "result.bin", size: 1 });
+    assert.deepEqual(clicks, [url]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else Reflect.deleteProperty(globalThis, "document");
+  }
 });
 
 test("scientific failure is not inferred from terminal scheduler state", () => {

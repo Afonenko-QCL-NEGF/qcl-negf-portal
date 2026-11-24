@@ -21,6 +21,8 @@ class Settings:
     default_memory_kb: int = 4194304
     max_body_bytes: int = 2_000_000
     max_download_bytes: int = 200_000_000
+    export_disk_bytes: int = 100 * 1024**3
+    export_ttl_seconds: int = 86400
 
     def __post_init__(self) -> None:
         if len(self.token) < 32 or not self.token.isascii():
@@ -56,6 +58,8 @@ class Settings:
             "default_memory_kb",
             "max_body_bytes",
             "max_download_bytes",
+            "export_disk_bytes",
+            "export_ttl_seconds",
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
@@ -81,6 +85,8 @@ class Settings:
                 "default_memory_kb",
                 "max_body_bytes",
                 "max_download_bytes",
+                "export_disk_bytes",
+                "export_ttl_seconds",
             )
             if "QCL_NEGF_" + name.upper() in os.environ
         }
